@@ -63,7 +63,8 @@ def parse():
     ap.add_argument("--graphs_per_epoch", type=int, default=32)
     ap.add_argument("--samples_per_graph", type=int, default=8)
     ap.add_argument("--n_train_steps", type=int, default=25)
-    ap.add_argument("--train_batch", type=int, default=64)
+    ap.add_argument("--train_batch", type=int, default=32)
+    ap.add_argument("--sim_chunk", type=int, default=64, help="samples per network call (memory)")
     ap.add_argument("--itr_per_epoch", type=int, default=50)
     ap.add_argument("--buffer_size", type=int, default=10_000)
     ap.add_argument("--am_epochs", type=int, default=30)
@@ -125,7 +126,7 @@ def main():
         grad_clip=a.grad_clip, alpha_max=a.alpha_max, max_stages=a.stages,
         max_grad_calls=a.max_grad_calls, eval_every_stages=a.eval_every,
         fixed_corrector=a.analytic_corrector, amp=not a.no_amp, save_at=tuple(a.save_at),
-        seed=a.seed)
+        seed=a.seed, sim_chunk=a.sim_chunk)
     eval_ids = np.arange(len(val) if a.eval_graphs is None else min(a.eval_graphs, len(val)))
 
     def eval_fn(tr):
