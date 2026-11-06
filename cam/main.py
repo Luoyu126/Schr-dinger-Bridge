@@ -73,6 +73,8 @@ def main():
     parser.add_argument("--lr", type=float, default=0.0001)
     parser.add_argument("--weight_decay", type=float, default=0.0001)
     parser.add_argument("--patience", type=int, default=20)
+    parser.add_argument("--save_every_epoch", action="store_true",
+                        help="local addition (see UPSTREAM.md): also save epoch_XXXX.pt every epoch")
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
     parser.add_argument('--use_activation_checkpoint', action='store_true', help='use activation checkpoint')
     parser.add_argument('--compile', action='store_true', help='torch.compile the model')

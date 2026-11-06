@@ -360,6 +360,10 @@ class ULSolver(NNSolver):
                 wait = 0
             else:
                 wait += 1
+            # Local patch (see UPSTREAM.md): optionally keep every epoch's weights, so that
+            # training curves can be re-evaluated offline with any protocol.
+            if getattr(getattr(self, 'args', None), 'save_every_epoch', False):
+                self.save_ckpt(os.path.join(save_dir, f'epoch_{epoch:04d}.pt'))
                 
             if wait == self.patience:
                 self.accelerator.print('Early stop')

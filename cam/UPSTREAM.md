@@ -38,6 +38,9 @@ shows only the items below).
 7. `main.py`: registers `--method CAMPrior` and its flags (three added lines). All flag names are
    new, and every flag used in `scripts/` still resolves as before under argparse prefix matching.
 8. Added `tests/test_cam_prior.py` (CPU, run with `$CAM_PYTHON cam/tests/test_cam_prior.py`).
+9. `solvers/meta_solver.py` (unsupervised training loop) and `main.py`: `--save_every_epoch` also
+   saves `epoch_XXXX.pt` every epoch (CAMPrior writes its `.prior.json` sidecar next to each), so
+   training curves can be re-evaluated offline. Default off; `best.pt` handling is unchanged.
 
 `scripts/config.sh` and the other upstream scripts are unchanged and not used by our runner.
 `CAMPrior` runs through the same runner by appending flags, e.g.
