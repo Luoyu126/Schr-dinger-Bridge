@@ -34,6 +34,12 @@ Guidelines for any AI coding agent working in this repository.
 - Only read, write, or create files under `/usr0/home/shengyuf/yunyi/`. Never touch anything outside it.
 - This also covers temporary files, caches, cloned reference repos, logs, checkpoints, and experiment outputs. Put them under `/usr0/home/shengyuf/yunyi/` (for example a git-ignored directory in this repo), not in `/tmp` or elsewhere in the home directory.
 
+## Python environments
+
+- You may create your own environment, but only under `/usr0/home/shengyuf/yunyi/` (e.g. `/usr0/home/shengyuf/yunyi/envs/<name>`).
+- Never modify, install into, update, or delete any existing environment (conda `base`, other conda envs, system Python). Running an existing interpreter read-only is fine; installing packages into it is not.
+- Keep package caches inside `/usr0/home/shengyuf/yunyi/` too (e.g. set `PIP_CACHE_DIR`), and avoid tools that write registries outside it (e.g. `conda create` updates `~/.conda/environments.txt`; prefer `python -m venv`).
+
 ## General
 
 - Don't commit secrets, large datasets, checkpoints, or generated outputs. Add them to `.gitignore`.
