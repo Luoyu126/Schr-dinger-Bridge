@@ -74,7 +74,8 @@ def main():
                 if s is None or s["foreign"] or s["free"] < a.min_free_mb or load[g] >= a.per_gpu:
                     continue
                 name, cmd = jobs.pop(0)
-                env = dict(os.environ, CUDA_VISIBLE_DEVICES=str(g), PYTHONUNBUFFERED="1")
+                env = dict(os.environ, CUDA_VISIBLE_DEVICES=str(g), PYTHONUNBUFFERED="1",
+                           OMP_NUM_THREADS="2", MKL_NUM_THREADS="2")
                 log = open(logdir / f"{name}.log", "w")
                 p = subprocess.Popen(cmd, shell=True, stdout=log, stderr=subprocess.STDOUT, env=env)
                 running[name] = (p, g)
