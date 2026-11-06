@@ -260,7 +260,11 @@ base 配置：lr 3e-4，每 stage AM:CM=30:30 轮，20 个 stage，每轮新样�
     - 输出层零初始化；
     - 同一张图的 K 个样本各自作为一张图放进 batch，避免 GraphNorm 把不同样本混在一起；
     - ASBS 的 corrector h 也用 `Time2`，t 固定为 1。
-- 接入方式（在 CAM 代码里加 solver，还是把网络搬进 sbmis）待定。
+- **接入方式（用户决定，11-06）：方案 A，三臂都在 CAM 的代码里跑。**
+  - 把连续的 AS/ASBS（含 B1+ 参考过程）写成 CAM 代码里的新 solver，和 `solvers/cam.py` 并列。
+  - CAM、RLSA 等基线直接用官方实现；数据读取、网络和评测都和 CAM 论文一致。
+  - 需要从 `sbmis/` 移植：参考过程的闭式公式（转移、桥、lean adjoint、CM 目标）、逐图特征分解与缓存、replay buffer、AM/CM 交替、解析 corrector。已有的单元测试也一并移植，作为正确性检查。
+  - 注意：公开的 CAM 仓库没有 LICENSE 文件。把它的代码复制进我们的仓库之前，要先和学长确认可以这样用，尤其是我们的仓库公开的话。
 
 **温度**
 - AS 和 ASBS 臂（用户决定）：对齐 AS 和 ASBS 论文本身的设定，并适当考虑 MIS：**固定温度、不退火，取值比 0.5 低**。具体值按 §0.7 的 CPU 标定选。
