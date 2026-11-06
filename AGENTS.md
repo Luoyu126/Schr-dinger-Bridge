@@ -48,7 +48,9 @@ Guidelines for any AI coding agent working in this repository.
   - Adjoint Sampling code: `adjoint_sampling/`
   - DIFUSCO code (MIS network, datasets, evaluation): `DIFUSCO/`
   - Other papers as extracted text: `papers/*.txt`, `lit_pdfs/*.txt`
+  - Blessing et al. evaluation code: `variational_sampling_methods/`
   - If a paper you need isn't there, search the web, and save its PDF/text under `ref/`.
+- How ASBS and related work evaluate samplers, with citations: `docs/related_work_eval.md`. Read it before any evaluation decision.
 - When you bring a question or decision to the user, structure it as:
   1. What ASBS / related work does, with a citation (paper + section, table, or file:line).
   2. What you recommend for this project, and why.
