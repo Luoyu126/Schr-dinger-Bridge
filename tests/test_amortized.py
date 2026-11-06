@@ -32,7 +32,8 @@ def _pool(**kw):
 
 def _single(pool, gi):
     sp = pool.spec
-    en = MISEnergy(pool.g.adj(gi), sp.lambda_p, sp.kappa_w, sp.temp, device="cpu", dtype=F64)
+    en = MISEnergy(pool.g.adj(gi), sp.lambda_p, sp.kappa_w, sp.temp, device="cpu", dtype=F64,
+                   pmap=sp.pmap)
     if sp.base == "linear_energy_shift_rot":
         R = random_rotation(en.n, 1_000_003 * sp.rot_seed + gi)
         Ms = shifted_psd(en.M64.numpy())
@@ -44,11 +45,12 @@ def _single(pool, gi):
     return en, base
 
 
-def test_batched_energy_matches_single():
-    pool = _pool()
+@pytest.mark.parametrize("pmap", ["lin", "clamp", "smooth"])
+def test_batched_energy_matches_single(pmap):
+    pool = _pool(pmap=pmap)
     gids = np.array([0, 3, 3, 5])
     b = pool.batch(gids)
-    x = torch.randn(b.S, pool.n_max, dtype=F64) * b.mask
+    x = 1.5 * torch.randn(b.S, pool.n_max, dtype=F64) * b.mask
     e, g = pool.e_tgt(x, b), pool.grad_u(x, b)
     for s, gi in enumerate(gids):
         en, _ = _single(pool, gi)
@@ -128,7 +130,7 @@ def test_pads_do_not_affect_real_nodes():
     assert ((y1 - y2) * b.mask).abs().max() < 1e-6
 
 
-def _tiny_trainer(tmp_path, analytic=False, **kw):
+def _tiny_trainer(tmp_path, analytic=False, cfg_kw=None, **kw):
     torch.manual_seed(0)
     pool = _pool(**kw)
     u = DifuscoGNN(hidden=16, n_layers=2)
@@ -136,7 +138,7 @@ def _tiny_trainer(tmp_path, analytic=False, **kw):
     cfg = AmortizedConfig(graphs_per_epoch=3, samples_per_graph=4, n_train_steps=5,
                           train_batch=8, itr_per_epoch=3, am_epochs=2, cm_epochs=2,
                           max_stages=2, amp=False, fixed_corrector=analytic, kl_graphs=2,
-                          save_at=(24,))
+                          save_at=(24,), **(cfg_kw or {}))
     opt = {i: {"size": 4} for i in range(len(pool.g))}
 
     def evals(tr):
@@ -233,3 +235,20 @@ def test_decode_metrics_best_of_matches_single_instance_definition():
     got = decode_metrics(pool, b, x, K, None)
     assert abs(got["best_of_16"] - ref["best_of_16"]) < 1e-6
     assert abs(got["mis_size_mean"] - ref["mis_size_mean"]) < 1e-6
+
+
+@pytest.mark.parametrize("analytic,kw", [(False, dict(base="linear_energy_shift", rho=4.0)),
+                                         (True, dict(base="zero", source="delta"))],
+                         ids=["ASBS-B1p", "AS"])
+def test_per_node_clipping_and_bounded_pmap(tmp_path, analytic, kw):
+    import json
+    tr, summ = _tiny_trainer(tmp_path, analytic=analytic, pmap="smooth", temp=0.1,
+                             cfg_kw=dict(clip_mode="node", alpha_max=5.0), **kw)
+    assert summ["status"] == "ok"
+    recs = [json.loads(l) for l in (tmp_path / "log.jsonl").read_text().splitlines()]
+    st = [r for r in recs if r["stage"] >= 1]
+    assert all(0.0 <= r["clip_node_rate"] <= r["clip_rate"] <= 1.0 for r in st)
+    assert all(r["clip_node_rate"] > 0 for r in st)  # alpha 5 at T = 0.1 must bite
+    meta_spec = tr.pool.spec
+    assert meta_spec.pmap == "smooth"
+
