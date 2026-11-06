@@ -59,6 +59,8 @@ def parse():
                     help="terminal grad E/T clipping: whole-sample norm or per node")
     ap.add_argument("--pmap", choices=["lin", "clamp", "smooth"], default="lin",
                     help="p(x) inside E_quad (bounded maps fix low-T infeasible minima)")
+    ap.add_argument("--well", choices=["full", "out"], default="full",
+                    help="double well everywhere or only outside [-1, 1] (use with --pmap clamp)")
     # network (DIFUSCO gated GCN, shared by u and h)
     ap.add_argument("--hidden", type=int, default=128)
     ap.add_argument("--layers", type=int, default=8)
@@ -114,7 +116,7 @@ def main():
                        rho=a.rho, sigma=a.sigma, rot_seed=a.seed if a.rot_seed is None else a.rot_seed,
                        iso_match_rho=a.iso_match_rho, iso_match=a.iso_match,
                        sigma_min=a.sigma_min, vp_beta0=a.vp_beta0, vp_beta1=a.vp_beta1,
-                       source=a.source, prior_gamma=a.prior_gamma, pmap=a.pmap)
+                       source=a.source, prior_gamma=a.prior_gamma, pmap=a.pmap, well=a.well)
     n_max = int(max(train.n.max(), val.n.max()))
     pool = GraphPool(train, spec, device=dev, cache_size=a.cache_size, n_max=n_max)
     vpool = GraphPool(val, spec, device=dev, cache_size=len(val) + 1, n_max=n_max)
