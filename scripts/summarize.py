@@ -12,7 +12,21 @@ from pathlib import Path
 
 import numpy as np
 
-IGNORE = {"seed", "out"}
+IGNORE = {"seed", "out", "save_at"}
+# options added later whose default reproduces the earlier behaviour: runs that state the
+# default and runs made before the option existed belong to the same group
+NEUTRAL = {"rot_seed": None, "vp_beta0": 20.0, "vp_beta1": 0.1, "source": "gauss",
+           "source_std": 1.0, "analytic_corrector": False, "iso_match": "var", "ve_euler": False}
+
+
+def group_key(args: dict) -> tuple:
+    def keep(k, v):
+        if k in IGNORE or v is None or (k in NEUTRAL and v == NEUTRAL[k]):
+            return False
+        if k == "prior_gamma" and args.get("source") != "energy_prior":
+            return False  # only meaningful for the energy prior
+        return True
+    return tuple(sorted((k, str(v)) for k, v in args.items() if keep(k, v)))
 
 
 def running_out_dirs():
@@ -83,8 +97,7 @@ def main():
         args = meta["args"]
         # None-valued args are dropped so runs made before a new optional flag existed
         # group with later runs that leave it unset
-        key = tuple(sorted((k, str(v)) for k, v in args.items()
-                           if k not in IGNORE and v is not None))
+        key = group_key(args)
         groups[key].append((args["seed"], recs, summ))
     budgets = a.at or sorted({r["grad_calls"] for g in groups.values() for _, rs, _ in g
                               for r in rs if a.metrics[0] in r})[-1:]
