@@ -149,8 +149,9 @@ def _tiny_trainer(tmp_path, analytic=False, **kw):
 
 @pytest.mark.parametrize("kw", [dict(base="zero"), dict(base="linear_energy_shift", rho=4.0),
                                 dict(base="zero", source="energy_prior"),
-                                dict(base="iso_ou", iso_match_rho=4.0)],
-                         ids=["B0", "B1p", "prior", "iso"])
+                                dict(base="iso_ou", iso_match_rho=4.0, iso_match="m2"),
+                                dict(base="vp")],
+                         ids=["B0", "B1p", "prior", "iso_m2", "VP"])
 def test_amortized_trainer_smoke(tmp_path, kw):
     tr, summ = _tiny_trainer(tmp_path, **kw)
     assert summ["status"] == "ok" and summ["grad_calls"] == 2 * 2 * 12
