@@ -16,8 +16,11 @@ The only f-dependent parts are delegated to the base process:
 
 Budget unit: one energy-gradient call = grad U at one terminal sample (AM only).
 
-Also logged per stage: the control energy E[int 1/2 |g(t) v|^2 dt] of the AM trajectories,
-i.e. KL(P^u || P^base) of the current sampler to the reference process (Girsanov).
+Control energy E[int 1/2 |g(t) v|^2 dt] = KL(P^u || P^base) (Girsanov) is logged twice:
+`kl_ref` at every evaluation, from a fresh batch of the current sampler, and
+`ctrl_energy_stage`, the average over the AM trajectories generated during the stage (so a
+mix of the controllers trained within that stage). Evaluations run on a forked RNG, so the
+training trajectory does not depend on how often or with how many steps it is evaluated.
 Adjoint Sampling (AS) is run with `fixed_corrector`: a Dirac source and the analytic
 corrector h = grad log p_1^base, no CM stages (h is then exact).
 """
@@ -66,6 +69,7 @@ class ASBSConfig:
     fixed_corrector: bool = False   # AS: h is analytic and never trained; AM blocks only
     eval_at_start: bool = True      # evaluate the u = 0 sampler (the reference itself) first
     save_at: tuple = ()             # grad-call budgets at which to save a checkpoint
+    kl_samples: int = 1024          # fresh trajectories for kl_ref at each evaluation
 
 
 class Buffer:
@@ -161,8 +165,8 @@ class ASBSTrainer:
         for j in range(steps):
             t, dt = ts[j], ts[j + 1] - ts[j]
             v = self.u_sim(torch.full((B, 1), t, device=self.device), x) if controlled else None
-            if v is not None:  # KL(P^u || P^base) = E int 1/2 |g v|^2 dt (left-point rule)
-                ke += 0.5 * float(self.base.diff(t)) ** 2 * (v * v).sum(-1) * dt
+            if v is not None:  # KL(P^u || P^base) = E int 1/2 g^2 |v|^2 dt, v constant per step
+                ke += 0.5 * self.base.g2_step(t, dt) * (v * v).sum(-1)
             x = self.base.step(x, t, dt, v=v)
             if return_traj:
                 traj.append(x)
@@ -176,6 +180,23 @@ class ASBSTrainer:
         outs = [self.simulate(min(self.cfg.sample_batch, N - i), steps, controlled)[1]
                 for i in range(0, N, self.cfg.sample_batch)]
         return torch.cat(outs)
+
+    @torch.no_grad()
+    def kl_to_ref(self, N: int) -> float:
+        tot = 0.0
+        for i in range(0, N, self.cfg.sample_batch):
+            B = min(self.cfg.sample_batch, N - i)
+            self.simulate(B, self.cfg.n_train_steps)
+            tot += float(self._last_ke.sum())
+        return tot / N
+
+    def _evaluate(self) -> dict:
+        """eval_fn + kl_ref on a forked RNG (training randomness is left untouched)."""
+        devs = [self.device.index or 0] if self.device.type == "cuda" else []
+        with torch.random.fork_rng(devices=devs):
+            res = dict(self.eval_fn(self)) if self.eval_fn else {}
+            res["kl_ref"] = self.kl_to_ref(self.cfg.kl_samples)
+        return res
 
     def _check_finite(self, x, what):
         if not torch.isfinite(x).all() or x.abs().max() > self.cfg.explode_threshold:
@@ -266,7 +287,7 @@ class ASBSTrainer:
         stage_idx = 0
         if self.eval_fn and cfg.eval_at_start:
             self._record({"stage": 0, "grad_calls": self.energy.grad_calls,
-                          "wall": time.time() - self.t_start, **self.eval_fn(self)})
+                          "wall": time.time() - self.t_start, **self._evaluate()})
         try:
             for stage_idx in range(1, cfg.max_stages + 1):
                 losses = {}
@@ -282,12 +303,12 @@ class ASBSTrainer:
                     "wall": time.time() - self.t_start,
                     "am_loss": losses["adjoint"], "cm_loss": losses.get("corrector"),
                     "clip_rate": self._clip_hits / max(self._clip_total, 1),
-                    "ctrl_energy": self._ke_sum / max(self._ke_n, 1),
+                    "ctrl_energy_stage": self._ke_sum / max(self._ke_n, 1),
                 }
                 last = (stage_idx == cfg.max_stages or
                         (cfg.max_grad_calls and self.energy.grad_calls >= cfg.max_grad_calls))
                 if self.eval_fn and (stage_idx % cfg.eval_every_stages == 0 or last):
-                    rec.update(self.eval_fn(self))
+                    rec.update(self._evaluate())
                 self._record(rec)
                 self._maybe_save()
                 if last:
@@ -306,14 +327,17 @@ class ASBSTrainer:
         return summary
 
     def _maybe_save(self):
+        """Checkpoint at the first stage end with grad_calls >= each milestone. Files are
+        named by the grad calls actually used (which exceed the milestone when it falls
+        inside a stage)."""
         if not self.out_dir:
             return
-        for m in self.cfg.save_at:
-            if m not in self._saved and self.energy.grad_calls >= m:
-                torch.save({"u": self.u.state_dict(), "h": self.h.state_dict(),
-                            "grad_calls": self.energy.grad_calls, "cfg": asdict(self.cfg)},
-                           self.out_dir / f"ckpt_{m}.pt")
-                self._saved.add(m)
+        due = [m for m in self.cfg.save_at if m not in self._saved and self.energy.grad_calls >= m]
+        if due:
+            gc = self.energy.grad_calls
+            torch.save({"u": self.u.state_dict(), "h": self.h.state_dict(), "grad_calls": gc,
+                        "milestones": due, "cfg": asdict(self.cfg)}, self.out_dir / f"ckpt_{gc}.pt")
+            self._saved.update(due)
 
     def _record(self, rec):
         self.history.append(rec)
