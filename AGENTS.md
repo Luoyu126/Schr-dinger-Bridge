@@ -29,6 +29,11 @@ Guidelines for any AI coding agent working in this repository.
 - Commits are made only under the repository owner's configured git identity. Don't change `user.name` / `user.email` to anything AI-related.
 - Principle: the agent must not be visible anywhere in the repository history or contents.
 
+## Filesystem access
+
+- Only read, write, or create files under `/usr0/home/shengyuf/yunyi/`. Never touch anything outside it.
+- This also covers temporary files, caches, cloned reference repos, logs, checkpoints, and experiment outputs. Put them under `/usr0/home/shengyuf/yunyi/` (for example a git-ignored directory in this repo), not in `/tmp` or elsewhere in the home directory.
+
 ## General
 
 - Don't commit secrets, large datasets, checkpoints, or generated outputs. Add them to `.gitignore`.
