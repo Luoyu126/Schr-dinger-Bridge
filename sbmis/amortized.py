@@ -39,7 +39,7 @@ from sbmis.asbs import Diverged
 from sbmis.base.linear_energy_base import (GeometricVEBase, LinearEnergyBase, VPBase,
                                            iso_theta_for_var, ou_var, phi1, random_rotation)
 from sbmis.datasets import GraphSet
-from sbmis.energies.mis import p_and_dp
+from sbmis.energies.mis import p_and_dp, well_mask
 
 GRAPH_KINDS = ("linear_energy", "linear_energy_shift", "linear_energy_shift_rot", "iso_ou")
 
@@ -103,6 +103,7 @@ class ProblemSpec:
     source_std: float = 1.0
     prior_gamma: float = 4.0
     pmap: str = "lin"  # p(x) inside E_quad: lin | clamp | smooth (see sbmis/energies/mis.py)
+    well: str = "full"  # double well everywhere ("full") or only outside the box ("out")
 
 
 class GraphPool:
@@ -165,12 +166,12 @@ class GraphPool:
         sp, m = self.spec, b.mask.to(x.dtype)
         p = p_and_dp(x, sp.pmap)[0] * m
         quad = -p.sum(-1) + 0.5 * sp.lambda_p * (p * self._Ax(p, b)).sum(-1)
-        well = sp.kappa_w * (((x * x - 1.0) ** 2) * m).sum(-1)
+        well = sp.kappa_w * (well_mask(x, sp.well) * ((x * x - 1.0) ** 2) * m).sum(-1)
         return quad + well
 
     def grad_u(self, x, b):
         sp, m = self.spec, b.mask.to(x.dtype)
-        well = 4.0 * sp.kappa_w * x * (x * x - 1.0)
+        well = 4.0 * sp.kappa_w * well_mask(x, sp.well) * x * (x * x - 1.0)
         if sp.pmap == "lin":
             c = (-0.5 + 0.25 * sp.lambda_p * self.degree(b)) * m
             g = c + 0.25 * sp.lambda_p * self._Ax(x * m, b) + well

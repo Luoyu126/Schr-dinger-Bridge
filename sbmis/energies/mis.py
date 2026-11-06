@@ -16,6 +16,12 @@ neighbours' conflicts, so at low T the target prefers infeasible states; boundin
 [0, 1] restores "every corner local minimum is an independent set" for lambda_p > 1.
 All three agree on the corners x in {-1, 1}^n. M and c (used by the reference process)
 always describe the lin quadratic.
+Bounding p alone still leaves metastable infeasible states: inside the box the double well
+can hold a conflicting selected node near x = 1 (with smooth, every corner is stationary).
+`well` = "out" applies the double well only outside the box, kappa_w * (x^2 - 1)^2 * 1[|x| > 1]
+(gradient continuous, zero at |x| = 1); with pmap = clamp the energy is then multilinear in
+the box and its local minima are exactly the corners of maximal independent sets
+(lambda_p > 1), as in DiffUCO's discrete argument.
 
 All samplers in this package work with the potential U = E_tgt / T
 (so nu ∝ exp(-U)); `grad_u` is the gradient that counts as one
@@ -28,6 +34,11 @@ import torch
 
 
 PMAPS = ("lin", "clamp", "smooth")
+WELLS = ("full", "out")
+
+
+def well_mask(x: torch.Tensor, well: str):
+    return (x.abs() > 1.0).to(x.dtype) if well == "out" else 1.0
 
 
 def p_and_dp(x: torch.Tensor, pmap: str):
@@ -54,9 +65,11 @@ class MISEnergy:
         device: str | torch.device = "cpu",
         dtype: torch.dtype = torch.float32,
         pmap: str = "lin",
+        well: str = "full",
     ):
         assert pmap in PMAPS, pmap
-        self.pmap = pmap
+        assert well in WELLS, well
+        self.pmap, self.well = pmap, well
         A = torch.as_tensor(np.asarray(adj), dtype=torch.float64)
         assert A.ndim == 2 and A.shape[0] == A.shape[1]
         assert torch.allclose(A, A.T), "adjacency must be symmetric"
@@ -95,7 +108,7 @@ class MISEnergy:
         return -p.sum(-1) + 0.5 * self.lambda_p * (p * (p @ A)).sum(-1)
 
     def e_well(self, x: torch.Tensor) -> torch.Tensor:
-        return self.kappa_w * ((x * x - 1.0) ** 2).sum(-1)
+        return self.kappa_w * (well_mask(x, self.well) * (x * x - 1.0) ** 2).sum(-1)
 
     def e_tgt(self, x: torch.Tensor) -> torch.Tensor:
         return self.e_quad(x) + self.e_well(x)
@@ -108,7 +121,7 @@ class MISEnergy:
         return dp * (-1.0 + self.lambda_p * (p @ A))
 
     def grad_tgt(self, x: torch.Tensor) -> torch.Tensor:
-        return self.grad_quad(x) + 4.0 * self.kappa_w * x * (x * x - 1.0)
+        return self.grad_quad(x) + 4.0 * self.kappa_w * well_mask(x, self.well) * x * (x * x - 1.0)
 
     # --- potential U = E_tgt / T (sampler interface) ---------------------
     def potential(self, x: torch.Tensor) -> torch.Tensor:
