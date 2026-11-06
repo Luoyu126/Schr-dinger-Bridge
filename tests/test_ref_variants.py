@@ -7,8 +7,8 @@ import pytest
 import torch
 
 from asbs_reference import vp_coeff2, vp_cond_score, vp_sample_posterior
-from sbmis.base.linear_energy_base import (LinearEnergyBase, VPBase, build_base, random_rotation,
-                                           shifted_psd, terminal_var)
+from sbmis.base.linear_energy_base import (VPBase, build_base, random_rotation, shifted_psd,
+                                           terminal_mean_sq, terminal_var)
 from sbmis.energies.mis import MISEnergy
 from sbmis.graphs import er_graph
 
@@ -69,6 +69,20 @@ def test_iso_ou_matches_terminal_variance(R):
     assert (iso.b64 == 0).all()
 
 
+def test_iso_ou_matches_second_moment_by_simulation():
+    """iso_match='m2': E|X_1|^2 / n of the isotropic OU equals that of B1+ (incl. its mean)."""
+    torch.manual_seed(4)
+    en = _energy()
+    ref = build_base("linear_energy_shift", en, rho=4.0, dtype=F64)
+    iso = build_base("iso_ou", en, dtype=F64, iso_match_rho=4.0, iso_match="m2")
+    want = terminal_var(ref) + terminal_mean_sq(ref)
+    assert abs(terminal_var(iso) - want) < 1e-9
+    x0 = torch.randn(200_000, en.n, dtype=F64)
+    for b in (ref, iso):
+        x1 = b.transition_sample(x0, 1.0)
+        assert abs(float(x1.pow(2).mean()) / want - 1) < 0.01
+
+
 B0, B1, SIG = 20.0, 0.1, 1.0
 
 
@@ -127,6 +141,7 @@ def test_vp_lean_adjoint_vs_autodiff():
 def test_build_base_all_kinds(kind):
     en = _energy()
     b = build_base(kind, en, rho=2.0, sigma=1.0, dtype=F64, sigma_min=0.001, iso_match_rho=2.0)
+    assert b.g2_step(0.2, 0.01) > 0
     assert b.info["kind"] == kind
     x = torch.randn(8, en.n, dtype=F64)
     y = b.step(x, 0.3, 0.01, v=torch.randn_like(x))

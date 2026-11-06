@@ -53,7 +53,8 @@ def test_delta_source_and_analytic_corrector():
     assert (h(torch.ones(7, 1), x1) + x1 / base.total_var).abs().max() < 1e-10
 
 
-def _tiny_run(tmp_path, base_kind, source_kind, analytic=False, **bkw):
+def _tiny_run(tmp_path, base_kind, source_kind, analytic=False, eval_every=1, n_eval=64,
+              **bkw):
     torch.manual_seed(0)
     en = MISEnergy(er_graph(8, 0.3, seed=1), 2.0, 2.0, 0.5, device="cpu")
     base = build_base(base_kind, en, sigma=1.0, device="cpu", **bkw)
@@ -63,8 +64,9 @@ def _tiny_run(tmp_path, base_kind, source_kind, analytic=False, **bkw):
     h = AnalyticCorrector(base) if analytic else build_net("mlp", adj, hidden=32, layers=2)
     cfg = ASBSConfig(n_train_steps=10, resample_size=64, sample_batch=64, train_batch=64,
                      itr_per_epoch=2, am_epochs=2, cm_epochs=2, max_stages=2,
-                     fixed_corrector=analytic, save_at=(128, 10**9))
-    evals = lambda tr: {"x1_mean": float(tr.sample(64, 10).mean())}
+                     fixed_corrector=analytic, save_at=(128, 10**9), kl_samples=64,
+                     eval_every_stages=eval_every)
+    evals = lambda tr: {"x1_mean": float(tr.sample(n_eval, 10).mean())}
     tr = ASBSTrainer(en, base, u, h, cfg, device="cpu", out_dir=tmp_path, eval_fn=evals,
                      log=lambda *_: None, source=src)
     summ = tr.run()
@@ -76,8 +78,9 @@ def test_trainer_logs_and_checkpoints(tmp_path):
     summ, recs = _tiny_run(tmp_path, "linear_energy_shift", "energy_prior", rho=4.0)
     assert summ["status"] == "ok"
     assert recs[0]["stage"] == 0 and recs[0]["grad_calls"] == 0 and "x1_mean" in recs[0]
-    assert all(r["ctrl_energy"] >= 0 for r in recs[1:])
-    assert recs[-1]["ctrl_energy"] > 0       # u is no longer zero after training
+    assert recs[0]["kl_ref"] == 0.0          # u = 0 at initialisation
+    assert all(r["ctrl_energy_stage"] >= 0 for r in recs[1:])
+    assert recs[-1]["kl_ref"] > 0 and recs[-1]["ctrl_energy_stage"] > 0
     assert (tmp_path / "ckpt_128.pt").exists() and not (tmp_path / "ckpt_1000000000.pt").exists()
 
 
@@ -87,3 +90,15 @@ def test_adjoint_sampling_mode(tmp_path):
     assert all(r["cm_loss"] is None for r in recs[1:])
     # AM-only stages: 2 epochs x 64 samples per stage
     assert [r["grad_calls"] for r in recs] == [0, 128, 256]
+
+
+def test_evaluation_does_not_change_training(tmp_path):
+    """Evaluations run on a forked RNG: the training losses do not depend on the schedule."""
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    a = _tiny_run(tmp_path / "a", "linear_energy_shift", "gauss", rho=4.0)[1]
+    b = _tiny_run(tmp_path / "b", "linear_energy_shift", "gauss", rho=4.0, eval_every=2,
+                  n_eval=128)[1]
+    la = [(r["am_loss"], r["cm_loss"]) for r in a[1:]]
+    lb = [(r["am_loss"], r["cm_loss"]) for r in b[1:]]
+    assert la == lb
