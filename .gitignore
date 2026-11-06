@@ -1,6 +1,7 @@
 runs/
 data/cache/
 data/datasets/
+data/cam/
 __pycache__/
 *.pyc
 *.pt
