@@ -40,6 +40,21 @@ Guidelines for any AI coding agent working in this repository.
 - Never modify, install into, update, or delete any existing environment (conda `base`, other conda envs, system Python). Running an existing interpreter read-only is fine; installing packages into it is not.
 - Keep package caches inside `/usr0/home/shengyuf/yunyi/` too (e.g. set `PIP_CACHE_DIR`), and avoid tools that write registries outside it (e.g. `conda create` updates `~/.conda/environments.txt`; prefer `python -m venv`).
 
+## Research decisions: check the literature first
+
+- Before you answer a methodology question or propose a design, evaluation, or experiment decision, check how ASBS (Liu et al., 2025, "Adjoint Schrödinger Bridge Sampler") and the closest related work handle it. Do this on your own; don't wait for the user to tell you to look.
+- Where the references are (read-only, all under `/usr0/home/shengyuf/yunyi/ref/`):
+  - ASBS paper: `papers/asbs.html`; official ASBS code: `adjoint_samplers/`
+  - Adjoint Sampling code: `adjoint_sampling/`
+  - DIFUSCO code (MIS network, datasets, evaluation): `DIFUSCO/`
+  - Other papers as extracted text: `papers/*.txt`, `lit_pdfs/*.txt`
+  - If a paper you need isn't there, search the web, and save its PDF/text under `ref/`.
+- When you bring a question or decision to the user, structure it as:
+  1. What ASBS / related work does, with a citation (paper + section, table, or file:line).
+  2. What you recommend for this project, and why.
+  3. What could go wrong with the recommendation, and with simply copying the literature.
+- Communicate in Chinese (the user's language). Don't use internal codenames (graph or run IDs, group names, plan item numbers) without saying in plain words what they refer to.
+
 ## General
 
 - Don't commit secrets, large datasets, checkpoints, or generated outputs. Add them to `.gitignore`.
