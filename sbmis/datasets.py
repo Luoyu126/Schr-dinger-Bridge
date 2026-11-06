@@ -23,7 +23,9 @@ SPLIT_SEED = {"train": 0, "val": 10_000_000, "test": 20_000_000}
 def er_dataset_graph(n_min: int, n_max: int, p: float, seed: int) -> tuple[int, np.ndarray]:
     rng = random.Random(seed)
     n = rng.randint(n_min, n_max)
-    g = nx.erdos_renyi_graph(n, p, seed=seed)
+    # edges from the continuing stream (n and the edges independent, as in DIFUSCO's
+    # single global stream); seeding networkx with `seed` again would tie edge (0, 1) to n
+    g = nx.erdos_renyi_graph(n, p, seed=rng)
     e = np.array(sorted((min(a, b), max(a, b)) for a, b in g.edges()), dtype=np.int32)
     return n, e.reshape(-1, 2)
 
