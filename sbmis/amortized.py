@@ -39,6 +39,7 @@ from sbmis.asbs import Diverged
 from sbmis.base.linear_energy_base import (GeometricVEBase, LinearEnergyBase, VPBase,
                                            iso_theta_for_var, ou_var, phi1, random_rotation)
 from sbmis.datasets import GraphSet
+from sbmis.energies.mis import p_and_dp
 
 GRAPH_KINDS = ("linear_energy", "linear_energy_shift", "linear_energy_shift_rot", "iso_ou")
 
@@ -101,6 +102,7 @@ class ProblemSpec:
     source: str = "gauss"
     source_std: float = 1.0
     prior_gamma: float = 4.0
+    pmap: str = "lin"  # p(x) inside E_quad: lin | clamp | smooth (see sbmis/energies/mis.py)
 
 
 class GraphPool:
@@ -161,15 +163,20 @@ class GraphPool:
 
     def e_tgt(self, x, b):
         sp, m = self.spec, b.mask.to(x.dtype)
-        p = 0.5 * (x + 1.0) * m
+        p = p_and_dp(x, sp.pmap)[0] * m
         quad = -p.sum(-1) + 0.5 * sp.lambda_p * (p * self._Ax(p, b)).sum(-1)
         well = sp.kappa_w * (((x * x - 1.0) ** 2) * m).sum(-1)
         return quad + well
 
     def grad_u(self, x, b):
         sp, m = self.spec, b.mask.to(x.dtype)
-        c = (-0.5 + 0.25 * sp.lambda_p * self.degree(b)) * m
-        g = c + 0.25 * sp.lambda_p * self._Ax(x * m, b) + 4.0 * sp.kappa_w * x * (x * x - 1.0)
+        well = 4.0 * sp.kappa_w * x * (x * x - 1.0)
+        if sp.pmap == "lin":
+            c = (-0.5 + 0.25 * sp.lambda_p * self.degree(b)) * m
+            g = c + 0.25 * sp.lambda_p * self._Ax(x * m, b) + well
+        else:
+            p, dp = p_and_dp(x, sp.pmap)
+            g = dp * (-1.0 + sp.lambda_p * self._Ax(p * m, b)) + well
         return g * m / sp.temp
 
     # ---- per-graph reference-process parameters -----------------------------
@@ -526,7 +533,7 @@ class AmortizedTrainer:
             for stage_idx in range(1, cfg.max_stages + 1):
                 losses = {}
                 self._clip_hits = self._clip_total = 0
-                self._ke_sum, self._ke_n = 0.0, 0
+                        self._ke_sum, self._ke_n = 0.0, 0
                 for blk in order:
                     ls = [self.train_epoch(blk, init=(stage_idx == 1 and blk == order[0]))
                           for _ in range(n_ep[blk])]

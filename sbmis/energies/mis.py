@@ -7,6 +7,16 @@ Encoding: x in R^n, p = (x + 1) / 2.
     E_tgt(x)  = E_quad(x) + kappa_w * sum_i (x_i^2 - 1)^2
     nu(x)     ∝ exp(-E_tgt(x) / T)
 
+`pmap` selects how p is computed from x inside E_quad (the double well is unchanged):
+    lin    : p = (x + 1) / 2                       (original; unbounded p)
+    clamp  : p = clip((x + 1) / 2, 0, 1)
+    smooth : p = S(clip((x + 1) / 2, 0, 1)),  S(q) = 3q^2 - 2q^3  (C^1)
+With an unbounded p an unselected node at x < -1 has p < 0 and "discounts" its selected
+neighbours' conflicts, so at low T the target prefers infeasible states; bounding p in
+[0, 1] restores "every corner local minimum is an independent set" for lambda_p > 1.
+All three agree on the corners x in {-1, 1}^n. M and c (used by the reference process)
+always describe the lin quadratic.
+
 All samplers in this package work with the potential U = E_tgt / T
 (so nu ∝ exp(-U)); `grad_u` is the gradient that counts as one
 "energy gradient call" per sample.
@@ -15,6 +25,23 @@ from __future__ import annotations
 
 import numpy as np
 import torch
+
+
+PMAPS = ("lin", "clamp", "smooth")
+
+
+def p_and_dp(x: torch.Tensor, pmap: str):
+    """p(x) and dp/dx for the three encodings (elementwise)."""
+    q = 0.5 * (x + 1.0)
+    if pmap == "lin":
+        return q, torch.full_like(x, 0.5)
+    inside = ((q > 0.0) & (q < 1.0)).to(x.dtype)
+    qc = q.clamp(0.0, 1.0)
+    if pmap == "clamp":
+        return qc, 0.5 * inside
+    if pmap == "smooth":
+        return qc * qc * (3.0 - 2.0 * qc), 3.0 * qc * (1.0 - qc) * inside
+    raise ValueError(pmap)
 
 
 class MISEnergy:
@@ -26,7 +53,10 @@ class MISEnergy:
         temp: float = 0.5,
         device: str | torch.device = "cpu",
         dtype: torch.dtype = torch.float32,
+        pmap: str = "lin",
     ):
+        assert pmap in PMAPS, pmap
+        self.pmap = pmap
         A = torch.as_tensor(np.asarray(adj), dtype=torch.float64)
         assert A.ndim == 2 and A.shape[0] == A.shape[1]
         assert torch.allclose(A, A.T), "adjacency must be symmetric"
@@ -61,7 +91,7 @@ class MISEnergy:
 
     def e_quad(self, x: torch.Tensor) -> torch.Tensor:
         A, _, _ = self._mats(x)
-        p = 0.5 * (x + 1.0)
+        p, _ = p_and_dp(x, self.pmap)
         return -p.sum(-1) + 0.5 * self.lambda_p * (p * (p @ A)).sum(-1)
 
     def e_well(self, x: torch.Tensor) -> torch.Tensor:
@@ -71,8 +101,11 @@ class MISEnergy:
         return self.e_quad(x) + self.e_well(x)
 
     def grad_quad(self, x: torch.Tensor) -> torch.Tensor:
-        _, M, c = self._mats(x)
-        return c + x @ M
+        A, M, c = self._mats(x)
+        if self.pmap == "lin":
+            return c + x @ M
+        p, dp = p_and_dp(x, self.pmap)
+        return dp * (-1.0 + self.lambda_p * (p @ A))
 
     def grad_tgt(self, x: torch.Tensor) -> torch.Tensor:
         return self.grad_quad(x) + 4.0 * self.kappa_w * x * (x * x - 1.0)
