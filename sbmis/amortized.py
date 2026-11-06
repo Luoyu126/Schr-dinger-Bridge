@@ -17,7 +17,7 @@ Per-graph pieces:
 Per-graph eigendecompositions (float64) are cached in an LRU cache and recomputed on a miss.
 
 The trainer mirrors sbmis.asbs.ASBSTrainer (AM/CM alternation, replay buffers, IPF init,
-alpha_max clipping scaled by sqrt(n_g / 100) per sample, Adam shared by u and h, evaluations on
+alpha_max clipping scaled by sqrt(n_g / 100) per sample (or per node, clip_mode="node"), Adam shared by u and h, evaluations on
 a forked RNG). Each epoch draws `graphs_per_epoch` training graphs and `samples_per_graph`
 trajectories on each. Budget unit: one energy-gradient call = one terminal sample.
 """
@@ -304,6 +304,10 @@ class AmortizedConfig:
     lr: float = 3e-4
     grad_clip: float | None = None
     alpha_max: float = 100.0
+    # terminal-gradient clipping of grad E / T: "vector" = whole-sample L2 norm with threshold
+    # alpha_max * sqrt(n_g / 100); "node" = each node's component clipped to |.| <= alpha_max
+    # (the official ASBS / AS codes clip per particle)
+    clip_mode: str = "vector"
     max_stages: int = 20
     max_grad_calls: int | None = None
     eval_every_stages: int = 1
@@ -368,6 +372,7 @@ class AmortizedTrainer:
         self.grad_calls, self.t_start, self._epoch = 0, time.time(), 0
         self._saved: set = set()
         self._clip_hits = self._clip_total = 0
+        self._clip_node_hits = self._clip_node_total = 0
         self._ke_sum, self._ke_n = 0.0, 0
 
     # ---- network evaluation -------------------------------------------------
@@ -437,11 +442,19 @@ class AmortizedTrainer:
         g = self.pool.grad_u(x1, b)
         self.grad_calls += b.S
         alpha = 100.0 if cfg.alpha_max is None else cfg.alpha_max
-        alpha = alpha * torch.sqrt(b.n.float() / 100.0)
-        norm = torch.linalg.vector_norm(g, dim=-1)
-        self._clip_hits += int((norm > alpha).sum())
+        if cfg.clip_mode == "node":
+            over = (g.abs() > alpha) & b.mask
+            self._clip_hits += int(over.any(-1).sum())
+            self._clip_node_hits += int(over.sum())
+            self._clip_node_total += int(b.mask.sum())
+            g = g.clamp(-alpha, alpha)
+        else:
+            assert cfg.clip_mode == "vector", cfg.clip_mode
+            alpha = alpha * torch.sqrt(b.n.float() / 100.0)
+            norm = torch.linalg.vector_norm(g, dim=-1)
+            self._clip_hits += int((norm > alpha).sum())
+            g = g * torch.clamp(alpha / (norm + 1e-6), max=1.0)[:, None]
         self._clip_total += b.S
-        g = g * torch.clamp(alpha / (norm + 1e-6), max=1.0)[:, None]
         if not init or cfg.fixed_corrector:
             g = g + self._chunked_net(self.h, torch.ones(b.S, device=self.device), x1, b)
         self.buf_am.add(gid=torch.as_tensor(b.gids, device=self.device), x0=x0, x1=x1, a1=g)
@@ -533,7 +546,8 @@ class AmortizedTrainer:
             for stage_idx in range(1, cfg.max_stages + 1):
                 losses = {}
                 self._clip_hits = self._clip_total = 0
-                        self._ke_sum, self._ke_n = 0.0, 0
+                self._clip_node_hits = self._clip_node_total = 0
+                self._ke_sum, self._ke_n = 0.0, 0
                 for blk in order:
                     ls = [self.train_epoch(blk, init=(stage_idx == 1 and blk == order[0]))
                           for _ in range(n_ep[blk])]
@@ -542,6 +556,8 @@ class AmortizedTrainer:
                        "wall": time.time() - self.t_start,
                        "am_loss": losses["adjoint"], "cm_loss": losses.get("corrector"),
                        "clip_rate": self._clip_hits / max(self._clip_total, 1),
+                       "clip_node_rate": (self._clip_node_hits / self._clip_node_total
+                                          if self._clip_node_total else None),
                        "ctrl_energy_stage": self._ke_sum / max(self._ke_n, 1),
                        "cache_misses": self.pool.misses}
                 last = stage_idx == cfg.max_stages or (
