@@ -15,6 +15,11 @@ The only f-dependent parts are delegated to the base process:
   cm_target (grad log p^base(X_1 | X_0)) and step (simulator).
 
 Budget unit: one energy-gradient call = grad U at one terminal sample (AM only).
+
+Also logged per stage: the control energy E[int 1/2 |g(t) v|^2 dt] of the AM trajectories,
+i.e. KL(P^u || P^base) of the current sampler to the reference process (Girsanov).
+Adjoint Sampling (AS) is run with `fixed_corrector`: a Dirac source and the analytic
+corrector h = grad log p_1^base, no CM stages (h is then exact).
 """
 from __future__ import annotations
 
@@ -58,6 +63,9 @@ class ASBSConfig:
     # standard AM loss (E_t is deterministic), but per-direction reweighted so the
     # targets are not amplified by exp(|theta|) along theta < 0 directions.
     am_precond: bool = False
+    fixed_corrector: bool = False   # AS: h is analytic and never trained; AM blocks only
+    eval_at_start: bool = True      # evaluate the u = 0 sampler (the reference itself) first
+    save_at: tuple = ()             # grad-call budgets at which to save a checkpoint
 
 
 class Buffer:
@@ -99,19 +107,34 @@ class PrecondController(torch.nn.Module):
         return self.base.lean_adjoint(self.net(t, x), t)
 
 
+class AnalyticCorrector(torch.nn.Module):
+    """h(x1) = grad log p_1^base(x1) for the Dirac source X_0 = 0 (Adjoint Sampling)."""
+
+    def __init__(self, base):
+        super().__init__()
+        self.base = base
+
+    def forward(self, t, x):
+        return self.base.cm_target(torch.zeros_like(x), x)
+
+
 class ASBSTrainer:
     def __init__(self, energy, base, controller, corrector, cfg: ASBSConfig,
                  device="cuda", out_dir: str | Path | None = None,
-                 eval_fn: Callable | None = None, log=print):
+                 eval_fn: Callable | None = None, log=print, source=None):
         self.energy, self.base, self.cfg = energy, base, cfg
         self.u, self.h = controller.to(device), corrector.to(device)
         self.u_sim = PrecondController(self.u, base) if cfg.am_precond else self.u
         self.device = torch.device(device)
         self.n = energy.dim
-        self.opt = torch.optim.Adam([
-            {"params": self.u.parameters(), "lr": cfg.lr},
-            {"params": self.h.parameters(), "lr": cfg.lr},
-        ])
+        if source is None:
+            from sbmis.sources import IsoGaussianSource
+            source = IsoGaussianSource(self.n, cfg.source_std)
+        self.source = source
+        if cfg.fixed_corrector:
+            assert not any(True for _ in self.h.parameters()), "fixed corrector must be analytic"
+        groups = [{"params": list(m.parameters()), "lr": cfg.lr} for m in (self.u, self.h)]
+        self.opt = torch.optim.Adam([g for g in groups if g["params"]])
         self.buf_am, self.buf_cm = Buffer(cfg.buffer_size), Buffer(cfg.buffer_size)
         self.alpha_eff = cfg.alpha_max * (math.sqrt(self.n / 100.0) if cfg.alpha_sqrt_n_scale else 1.0)
         self.out_dir = Path(out_dir) if out_dir else None
@@ -123,21 +146,28 @@ class ASBSTrainer:
         self._clip_total = 0
         self._diag: dict = {}
         self._epoch = 0
+        self._ke_sum, self._ke_n = 0.0, 0
+        self._last_ke = None
+        self._saved: set = set()
 
     # ---------------------------------------------------------------- sampling
     @torch.no_grad()
     def simulate(self, B: int, steps: int, controlled: bool = True, return_traj: bool = False):
-        x0 = torch.randn(B, self.n, device=self.device) * self.cfg.source_std
+        x0 = self.source.sample(B, self.device)
         ts = torch.linspace(0.0, 1.0, steps + 1).tolist()
         x, traj = x0, [x0]
+        ke = torch.zeros(B, device=self.device)
         self.u.eval()
         for j in range(steps):
             t, dt = ts[j], ts[j + 1] - ts[j]
             v = self.u_sim(torch.full((B, 1), t, device=self.device), x) if controlled else None
+            if v is not None:  # KL(P^u || P^base) = E int 1/2 |g v|^2 dt (left-point rule)
+                ke += 0.5 * float(self.base.diff(t)) ** 2 * (v * v).sum(-1) * dt
             x = self.base.step(x, t, dt, v=v)
             if return_traj:
                 traj.append(x)
         self.u.train()
+        self._last_ke = ke
         if return_traj:
             return torch.stack(traj)
         return x0, x
@@ -159,12 +189,14 @@ class ASBSTrainer:
             B = min(cfg.sample_batch, cfg.resample_size - i)
             x0, x1 = self.simulate(B, cfg.n_train_steps)
             self._check_finite(x1, "AM samples")
+            self._ke_sum += float(self._last_ke.sum())
+            self._ke_n += B
             g = self.energy.grad_u(x1)
             norm = torch.linalg.vector_norm(g, dim=-1)
             self._clip_hits += int((norm > self.alpha_eff).sum())
             self._clip_total += B
             g = g * torch.clamp(self.alpha_eff / (norm + 1e-6), max=1.0)[:, None]
-            if not init:
+            if not init or cfg.fixed_corrector:
                 g = g + self.h(torch.ones(B, 1, device=self.device), x1)
             self.buf_am.add(x0=x0, x1=x1, a1=g)
             self._diag["x1_absmax"] = max(self._diag.get("x1_absmax", 0.0), x1.abs().max().item())
@@ -227,13 +259,19 @@ class ASBSTrainer:
         cfg = self.cfg
         order = (["corrector", "adjoint"] if cfg.init_stage == "corrector"
                  else ["adjoint", "corrector"])
+        if cfg.fixed_corrector:
+            order = ["adjoint"]
         n_ep = {"adjoint": cfg.am_epochs, "corrector": cfg.cm_epochs}
         status = "ok"
         stage_idx = 0
+        if self.eval_fn and cfg.eval_at_start:
+            self._record({"stage": 0, "grad_calls": self.energy.grad_calls,
+                          "wall": time.time() - self.t_start, **self.eval_fn(self)})
         try:
             for stage_idx in range(1, cfg.max_stages + 1):
                 losses = {}
                 self._clip_hits = self._clip_total = 0
+                self._ke_sum, self._ke_n = 0.0, 0
                 for block in order:
                     ls = [self.train_epoch(block, init=(stage_idx == 1 and block == order[0]))
                           for _ in range(n_ep[block])]
@@ -242,14 +280,16 @@ class ASBSTrainer:
                     "stage": stage_idx,
                     "grad_calls": self.energy.grad_calls,
                     "wall": time.time() - self.t_start,
-                    "am_loss": losses["adjoint"], "cm_loss": losses["corrector"],
+                    "am_loss": losses["adjoint"], "cm_loss": losses.get("corrector"),
                     "clip_rate": self._clip_hits / max(self._clip_total, 1),
+                    "ctrl_energy": self._ke_sum / max(self._ke_n, 1),
                 }
                 last = (stage_idx == cfg.max_stages or
                         (cfg.max_grad_calls and self.energy.grad_calls >= cfg.max_grad_calls))
                 if self.eval_fn and (stage_idx % cfg.eval_every_stages == 0 or last):
                     rec.update(self.eval_fn(self))
                 self._record(rec)
+                self._maybe_save()
                 if last:
                     break
         except Diverged as e:
@@ -264,6 +304,16 @@ class ASBSTrainer:
                 torch.save({"u": self.u.state_dict(), "h": self.h.state_dict(),
                             "cfg": asdict(cfg)}, self.out_dir / "final.pt")
         return summary
+
+    def _maybe_save(self):
+        if not self.out_dir:
+            return
+        for m in self.cfg.save_at:
+            if m not in self._saved and self.energy.grad_calls >= m:
+                torch.save({"u": self.u.state_dict(), "h": self.h.state_dict(),
+                            "grad_calls": self.energy.grad_calls, "cfg": asdict(self.cfg)},
+                           self.out_dir / f"ckpt_{m}.pt")
+                self._saved.add(m)
 
     def _record(self, rec):
         self.history.append(rec)
