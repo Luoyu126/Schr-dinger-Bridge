@@ -28,6 +28,7 @@ GROUPS = {
     "AS": ("ve_geometric", {"sigma_min": 0.001}, "delta", {}),
     "VP": ("vp", {}, "gauss", {}),
     "iso-OU@4": ("iso_ou", {"iso_match_rho": 4.0}, "gauss", {}),
+    "iso-OU@4 m2": ("iso_ou", {"iso_match_rho": 4.0, "iso_match": "m2"}, "gauss", {}),
     "rot-B1+@4": ("linear_energy_shift_rot", {"rho": 4.0}, "gauss", {}),
     "B0+prior2": ("zero", {}, "energy_prior", {"gamma_rel": 2.0}),
     "B0+prior4": ("zero", {}, "energy_prior", {"gamma_rel": 4.0}),
@@ -77,7 +78,9 @@ def main():
                 src = build_source(skind, en, **skw)
                 x = terminal(base, src, a.samples)
                 row = {"graph": g, "group": name, "amp": round(lean_adjoint_amp(base, en.n), 3),
-                       "x1_std": round(float(x.std()), 3),
+                       "x1_std": round(float(x.std(0).pow(2).mean().sqrt()), 3),  # centred
+                       "x1_rms": round(float(x.pow(2).mean().sqrt()), 3),
+                       "x1_mean": round(float(x.mean()), 3),
                        "E_tgt_mean": round(float(en.e_tgt(x).mean()), 2)}
                 if ref is not None:
                     d = discrete_metrics(x, ref["p"], ref["mis_codes"], ref["feasible"])
