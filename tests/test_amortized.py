@@ -33,7 +33,7 @@ def _pool(**kw):
 def _single(pool, gi):
     sp = pool.spec
     en = MISEnergy(pool.g.adj(gi), sp.lambda_p, sp.kappa_w, sp.temp, device="cpu", dtype=F64,
-                   pmap=sp.pmap)
+                   pmap=sp.pmap, well=sp.well)
     if sp.base == "linear_energy_shift_rot":
         R = random_rotation(en.n, 1_000_003 * sp.rot_seed + gi)
         Ms = shifted_psd(en.M64.numpy())
@@ -45,9 +45,10 @@ def _single(pool, gi):
     return en, base
 
 
-@pytest.mark.parametrize("pmap", ["lin", "clamp", "smooth"])
-def test_batched_energy_matches_single(pmap):
-    pool = _pool(pmap=pmap)
+@pytest.mark.parametrize("pmap,well", [("lin", "full"), ("clamp", "full"), ("smooth", "full"),
+                                       ("clamp", "out")])
+def test_batched_energy_matches_single(pmap, well):
+    pool = _pool(pmap=pmap, well=well)
     gids = np.array([0, 3, 3, 5])
     b = pool.batch(gids)
     x = 1.5 * torch.randn(b.S, pool.n_max, dtype=F64) * b.mask
