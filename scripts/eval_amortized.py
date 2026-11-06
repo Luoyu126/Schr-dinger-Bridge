@@ -4,6 +4,7 @@ For every run directory and checkpoint: K_max samples per test graph at each num
 inference steps N; metrics for every K in --k (best-of-K uses the first K samples), plus
 sampling wall-clock per graph. Writes <run>/eval_<split>_<ckpt>.json. Intermediate
 checkpoints (--ckpt ckpt_30720.pt ...) can be evaluated while the run is still training.
+Calls with different N merge into the same file (entries of the N evaluated now are replaced).
 
 python scripts/eval_amortized.py runs/amortized/er_200_300/*/ --split test --k 1 4 16 64 \
     --n_infer_steps 10 25 50 100
@@ -57,7 +58,7 @@ def evaluate_run(run: Path, ckpt: str, split: str, ks, steps, graphs_per_batch, 
             torch.cuda.synchronize()
             secs += time.time() - t0
             xs.append((b, x))
-        res = {"sample_sec_per_graph": secs / n}
+        res = {"sample_sec_per_graph": secs / n, "n_graphs": n}
         for K in ks:
             rows = []
             for b, x in xs:
@@ -76,7 +77,13 @@ def evaluate_run(run: Path, ckpt: str, split: str, ks, steps, graphs_per_batch, 
                           **{f"K{K}_ratio_mean": round(res[f'K{K}']['ratio_mean'], 4) for K in ks},
                           **{f"K{K}_ratio_best": round(res[f'K{K}']['ratio_best'], 4) for K in ks}}),
               flush=True)
-    (run / f"eval_{split}_{Path(ckpt).stem}.json").write_text(json.dumps(out, indent=1))
+    # several calls (e.g. N = 25 with K up to 64, then N = 100 with K up to 16) share one file:
+    # results of the N values evaluated now replace those entries, others are kept
+    f = run / f"eval_{split}_{Path(ckpt).stem}.json"
+    if f.exists():
+        old = json.loads(f.read_text())
+        out["results"] = {**old.get("results", {}), **out["results"]}
+    f.write_text(json.dumps(out, indent=1))
     return out
 
 
