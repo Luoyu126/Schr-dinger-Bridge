@@ -118,6 +118,10 @@ class LinearEnergyBase:
     def diff(self, t):
         return torch.full_like(torch.as_tensor(t, dtype=self.dtype), self.sigma)
 
+    def g2_step(self, t: float, dt: float) -> float:
+        """int_t^{t+dt} g^2 (used for the control-energy estimate)."""
+        return self.sigma**2 * dt
+
     # ---- (1) transition density -----------------------------------------
     def transition_mean_var(self, xs, delta):
         """Mean (orig coords) and eigen-variances of X_{s+delta} | X_s = xs."""
@@ -241,6 +245,12 @@ def terminal_var(base: "LinearEnergyBase", s0: float = 1.0) -> float:
     return float(var.mean())
 
 
+def terminal_mean_sq(base: "LinearEnergyBase") -> float:
+    """Mean over coordinates of E[X_1]^2 under u = 0 from a zero-mean source."""
+    m = -base.b64 * phi1(base.theta64, 1.0)   # eigen coordinates; the rotation keeps norms
+    return float((m**2).mean())
+
+
 def iso_theta_for_var(target_var: float, s0: float = 1.0, sigma: float = 1.0) -> float:
     """theta of the isotropic OU f = -theta x whose X_1 variance (from N(0, s0^2)) is target_var.
 
@@ -293,6 +303,9 @@ class VPBase:
         t = torch.as_tensor(t, dtype=self.dtype)
         return self.sigma * torch.sqrt(self.beta(t))
 
+    def g2_step(self, t: float, dt: float) -> float:
+        return self.sigma**2 * self._B(t, t + dt)
+
     def transition_mean_var(self, xs, s, t):
         Bst = self._B(s, t)
         return math.exp(-0.5 * Bst) * xs, self.sigma**2 * (-math.expm1(-Bst))
@@ -344,8 +357,13 @@ class GeometricVEBase:
     has_drift = False
     identity = True
 
-    def __init__(self, n, sigma_min=0.01, sigma_max=1.0, device="cpu", dtype=torch.float32):
+    def __init__(self, n, sigma_min=0.01, sigma_max=1.0, device="cpu", dtype=torch.float32,
+                 euler=False):
         self.n = n
+        # euler=True reproduces the official left-point Euler-Maruyama step, which injects
+        # 2 ln(r) / N / (1 - r^(-2/N)) times the exact variance per step (1.39x at N = 20,
+        # 1.07x at N = 100 for r = 1000). Default: exact for f = 0 with v held constant.
+        self.euler = euler
         self.sigma_min, self.sigma_max = float(sigma_min), float(sigma_max)
         self.ratio = self.sigma_max / self.sigma_min
         self.total_var = self.sigma_max**2 - self.sigma_min**2
@@ -358,6 +376,12 @@ class GeometricVEBase:
     def diff(self, t):
         t = torch.as_tensor(t, dtype=self.dtype)
         return self.sigma_min * self.ratio ** (1 - t) * math.sqrt(2 * math.log(self.ratio))
+
+    def g2_step(self, t: float, dt: float) -> float:
+        if self.euler:
+            return float(self.diff(float(t))) ** 2 * dt
+        return float(self._int_g2(torch.tensor(t + dt, dtype=torch.float64))
+                     - self._int_g2(torch.tensor(t, dtype=torch.float64)))
 
     def drift(self, t, x):
         return torch.zeros_like(x)
@@ -381,12 +405,13 @@ class GeometricVEBase:
         return (x0 - x1) / self._int_g2(torch.ones(1, device=x0.device, dtype=x0.dtype))
 
     def step(self, x, t, dt, v=None, z=None):
+        """x' = x + d v + sqrt(d) z with d = int_t^{t+dt} g^2 (or g(t)^2 dt if euler)."""
         if z is None:
             z = torch.randn_like(x)
-        g = float(self.diff(float(t)))
-        out = x + g * math.sqrt(dt) * z
+        d = self.g2_step(t, dt)
+        out = x + math.sqrt(d) * z
         if v is not None:
-            out = out + g**2 * dt * v
+            out = out + d * v
         return out
 
 
@@ -399,7 +424,10 @@ def build_base(kind: str, energy, sigma=1.0, rho=0.0, device="cpu", dtype=torch.
                              c -> R c): identical dynamics in rotated coordinates, but the
                              alignment with the hypercube / graph is destroyed
     iso_ou                   control: f = -theta x; theta = rho, or (iso_match_rho=R) the theta
-                             whose u = 0 terminal variance equals that of B1+ at rho = R
+                             whose u = 0 terminal spread equals that of B1+ at rho = R from an
+                             isotropic N(0, source_std^2) source: iso_match="var" matches the
+                             centred variance, "m2" the second moment E|X_1|^2 / n (B1+ also has
+                             a terminal mean from c; the isotropic OU has none)
     ve_geometric             B0-S f = 0, geometric noise (sigma = sigma_max)
     vp                       control: official VPSDE (beta0 -> beta1), sigma = stationary std
     """
@@ -417,19 +445,25 @@ def build_base(kind: str, energy, sigma=1.0, rho=0.0, device="cpu", dtype=torch.
         b = mk(R @ shifted_psd(M) @ R.T, R @ c, rho=rho)
         b.info = {"rot_seed": kw.get("rot_seed", 0)}
     elif kind == "iso_ou":
-        R = kw.get("iso_match_rho")
+        R, mode = kw.get("iso_match_rho"), kw.get("iso_match", "var")
+        s0 = kw.get("source_std", 1.0)
         if R is not None:
             ref = mk(shifted_psd(M), c, rho=R)
-            theta = iso_theta_for_var(terminal_var(ref, kw.get("source_std", 1.0)),
-                                      kw.get("source_std", 1.0), sigma)
+            target = terminal_var(ref, s0)
+            if mode == "m2":
+                target += terminal_mean_sq(ref)
+            elif mode != "var":
+                raise ValueError(mode)
+            theta = iso_theta_for_var(target, s0, sigma)
         else:
             theta = rho
         n = len(c)
         b = mk(np.eye(n), np.zeros(n), lam=theta)
-        b.info = {"iso_theta": theta, "iso_match_rho": R}
+        b.info = {"iso_theta": theta, "iso_match_rho": R, "iso_match": mode if R else None}
     elif kind == "ve_geometric":
         b = GeometricVEBase(energy.n, kw.get("sigma_min", 0.01), kw.get("sigma_max", sigma),
-                            device=device, dtype=dtype)
+                            device=device, dtype=dtype, euler=kw.get("ve_euler", False))
+        b.info = {"ve_euler": b.euler}
     elif kind == "vp":
         b = VPBase(energy.n, kw.get("vp_beta0", 20.0), kw.get("vp_beta1", 0.1), sigma,
                    device=device, dtype=dtype)
