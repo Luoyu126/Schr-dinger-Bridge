@@ -249,17 +249,19 @@ base 配置：lr 3e-4，每 stage AM:CM=30:30 轮，20 个 stage，每轮新样�
 
 - 公共基线：度数贪心、KaMIS 或 best-known。DiffUCO、SDDS 第一批只引用论文数字。DiffUCO + 能量第一批不跑。
 - 用户的理解：离散臂本质上是"RLSA 的信号 + CAM 的训练方式"。门槛是 RLSA：网络残差为 0 时采样器约等于 RLSA，训练后必须同预算地明显超过它。
-- **所有基线都必须在同一硬件、同一预算下实测，不能挑基线。** 起因是 CAM 的论文没有和 RLSA 比，而 RLSA 是同一作者组前一篇论文里不训练的方法，在 RB-[200-300] 上数字比 CAM 还高（`rld.txt` L461，`cam.txt` L398）。
+- **所有基线都必须在同一硬件、同一预算下实测，不能挑基线。** 起因是 CAM 的论文没有和 RLSA 比，而 RLSA 是同一作者组前一篇论文里不训练的方法，在 RB-[200-300] 上数字比 CAM 还高（`rld.txt` L461，`cam.txt` L398）。注意两者预算不同：RLD 里的 RLSA 用 200 个样本 × 300–500 步（`rld.txt` L885–888），CAM 用 20 个样本 × 50 步（`cam.txt` L1242），所以要同预算重跑才能比。
 
 **代码与网络（学长建议）**
 - 学长原话：用 https://github.com/Shengyu-Feng/CAM ，"那个 AnGNN 一般"。公开仓库已克隆到 `ref/CAM`（只读）。仓库里有 RLSA、DiffUCO、SDDS、RLNN 的实现；数据和训练好的模型在 huggingface 的 `shengyuf/CAM_data` 和 `shengyuf/CAM_models`。
-- AnGNN 基本就是我们现在的 DIFUSCO 门控 GCN。CAM 在 MIS 上用的是 `EncodeProcessDecode`（ER 上是 8 层 × 64 维，不接收时间，关掉混合精度）。
+- AnGNN 和我们现在的 DIFUSCO 门控 GCN 是同一类网络，但有一处关键差别（11-06 更正，之前写成"基本一样"）：AnGNN 在 MIS 上把每层的零初始化放在节点分支（`ref/CAM/models/angnn.py:230-235, 338-339`），所以初始化时它等于一个看不到图结构的逐节点 MLP；我们的网络把零初始化放在边分支。CAM 在 MIS 上用的是 `EncodeProcessDecode`（ER 上是 8 层 × 64 维，不接收时间，关掉混合精度）。
 - 决定：三臂统一用 `EncodeProcessDecode` 系列。
   - CAM 臂用原版（不带时间），配置照抄 CAM 脚本，先复现论文数字。
   - AS 和 ASBS 臂用 `EncodeProcessDecodeTime2`（标量输入，每层加时间嵌入），需要：
     - 输出层零初始化；
-    - 同一张图的 K 个样本各自作为一张图放进 batch，避免 GraphNorm 把不同样本混在一起；
+    - GraphNorm 按图、按样本分别归一化（torch_geometric `graph_norm.py:65-76`），CAM 的 (N, K) 布局本身就不会把不同样本混在一起。要处理的是我们按 n_max 补齐的布局里的填充节点，它们不能进入统计量；
     - ASBS 的 corrector h 也用 `Time2`，t 固定为 1。
+    - 编码器问题（11-06 发现）：EPD 的节点编码器偏置初始化为 0，每层是 LN(ReLU(w·s))，对正的输入尺度不变，所以初始化时网络只看得到 sign(x)（`enprocessde.py:47, 55`）。离散输入只取 {0,1}，不受影响；连续两臂可能需要改编码器（非零偏置或正弦标量嵌入），用小规模试跑选，并在论文里写明。
+    - 精度：CAM 的 ER 脚本关掉混合精度（`mis_er_cam.sh:3`），三臂统一用 fp32。
 - **接入方式（用户决定，11-06）：方案 A，三臂都在 CAM 的代码里跑。**
   - 把连续的 AS/ASBS（含 B1+ 参考过程）写成 CAM 代码里的新 solver，和 `solvers/cam.py` 并列。
   - CAM、RLSA 等基线直接用官方实现；数据读取、网络和评测都和 CAM 论文一致。
