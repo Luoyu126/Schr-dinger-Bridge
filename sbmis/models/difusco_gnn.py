@@ -23,6 +23,9 @@ Deviations, all required by ASBS and kept minimal:
     would couple independent samples; it is replaced by a per-node LayerNorm;
   * the last linear layer is zero-initialised, so the controller starts at u = 0 (as the
     ASBS / AS networks do).
+Like DIFUSCO on ER graphs (--use_activation_checkpoint), each layer can be checkpointed
+during training (`activation_checkpoint=True`): same outputs and gradients, edge
+activations are recomputed in the backward pass instead of stored.
 """
 from __future__ import annotations
 
@@ -30,6 +33,7 @@ import math
 
 import torch
 import torch.nn as nn
+from torch.utils.checkpoint import checkpoint
 
 
 def timestep_embedding(t: torch.Tensor, dim: int, max_period: float = 10000.0) -> torch.Tensor:
@@ -78,9 +82,11 @@ class DifuscoGNN(nn.Module):
     and .node2sample (N_nodes,). Returns (N_nodes,).
     """
 
-    def __init__(self, hidden: int = 256, n_layers: int = 12, time_scale: float = 1000.0):
+    def __init__(self, hidden: int = 256, n_layers: int = 12, time_scale: float = 1000.0,
+                 activation_checkpoint: bool = False):
         super().__init__()
         self.hidden, self.time_scale = hidden, time_scale
+        self.activation_checkpoint = activation_checkpoint
         t_dim = hidden // 2
         self.node_embed = nn.Linear(hidden, hidden)
         self.time_embed = nn.Sequential(nn.Linear(hidden, t_dim), nn.ReLU(), nn.Linear(t_dim, t_dim))
@@ -105,9 +111,16 @@ class DifuscoGNN(nn.Module):
         e = torch.zeros(src.shape[0], self.hidden, device=x.device, dtype=h.dtype)
         temb = self.time_embed(
             timestep_embedding(t.reshape(-1) * self.time_scale, self.hidden).to(wd))
+        ckpt = self.activation_checkpoint and torch.is_grad_enabled()
         for layer, tl, eo in zip(self.layers, self.time_layers, self.edge_out):
-            h_in, e_in = h, e
-            h, e = layer(h, e, src, dst)
-            h = h_in + h + tl(temb)[n2s]
-            e = e_in + eo(e)
+            if ckpt:
+                h, e = checkpoint(self._block, layer, tl, eo, h, e, temb, src, dst, n2s,
+                                  use_reentrant=False)
+            else:
+                h, e = self._block(layer, tl, eo, h, e, temb, src, dst, n2s)
         return self.out(torch.relu(self.out_norm(h))).squeeze(-1)
+
+    @staticmethod
+    def _block(layer, tl, eo, h, e, temb, src, dst, n2s):
+        h_new, e_new = layer(h, e, src, dst)
+        return h + h_new + tl(temb)[n2s], e + eo(e_new)
