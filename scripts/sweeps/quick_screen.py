@@ -1,9 +1,9 @@
 """Quick tuning screens that re-check last round's conclusions (plan §0.5.5).
 
-S1  U1 g2  network: {gnn, mlp} x rho {0, 4} x 2 seeds
+S1  U1 g2  network: {gnn, mlp} x rho {0, 4} x 3 seeds
 S2  U1 g2  lr {1e-4, 3e-4, 1e-3} x rho {0, 1, 4} x 3 seeds (GNN)
 S3  U1 g2  rho = 4 stabilisation: am_precond (EXPERIMENTAL) and grad-norm clip, 3 seeds
-S4  n=100  lr {1e-4, 3e-4, 1e-3} x rho {0, 2} x 2 seeds, plus lr 1e-3 + grad clip
+S4  n=100  lr {1e-4, 3e-4, 5e-4, 1e-3} x rho {0, 2} x 3 seeds, plus lr 1e-3 + grad clip
 
 Common: AM:CM = 30:30 epochs, 512 fresh samples / epoch, alpha_max = 100,
 CM first, sigma = 1. Writes runs/<screen>/jobs.tsv for scripts/launch.py.
@@ -39,7 +39,7 @@ def main():
 
     r = "runs/s1_net"
     screens[r] = [job(r, f"{net}_rho{rho}_s{s}", net=net, lr=3e-4, seed=s, **u1, **base_kw(rho))
-                  for net in ["gnn", "mlp"] for rho in [0, 4] for s in [0, 1]]
+                  for net in ["gnn", "mlp"] for rho in [0, 4] for s in [0, 1, 2]]
     r = "runs/s2_lr"
     screens[r] = [job(r, f"lr{lr:g}_rho{rho}_s{s}", net="gnn", lr=lr, seed=s, **u1, **base_kw(rho))
                   for lr in [1e-4, 3e-4, 1e-3] for rho in [0, 1, 4] for s in [0, 1, 2]]
@@ -54,9 +54,9 @@ def main():
     r = "runs/s4_n100_lr"
     screens[r] = (
         [job(r, f"lr{lr:g}_rho{rho}_s{s}", net="gnn", lr=lr, seed=s, **n100, **base_kw(rho))
-         for lr in [1e-4, 3e-4, 1e-3] for rho in [0, 2] for s in [0, 1]]
+         for lr in [1e-4, 3e-4, 5e-4, 1e-3] for rho in [0, 2] for s in [0, 1, 2]]
         + [job(r, f"gclip1_lr1e-3_rho{rho}_s{s}", net="gnn", lr=1e-3, grad_clip=1.0, seed=s,
-               **n100, **base_kw(rho)) for rho in [0, 2] for s in [0, 1]])
+               **n100, **base_kw(rho)) for rho in [0, 2] for s in [0, 1, 2]])
     for root, jobs in screens.items():
         Path(root).mkdir(parents=True, exist_ok=True)
         (Path(root) / "jobs.tsv").write_text("\n".join(jobs) + "\n")
