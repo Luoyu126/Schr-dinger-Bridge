@@ -110,9 +110,11 @@ class GraphPool:
                  n_max: int | None = None):
         self.g, self.spec, self.device = gset, spec, torch.device(device)
         self.n_max = int(n_max or gset.n.max())
-        self.cache: OrderedDict = OrderedDict()
+        self.cache: OrderedDict = OrderedDict()   # gid -> params (incl. its bank slot)
         self.cache_size = cache_size
         self.misses = 0
+        self._bank = None                          # padded theta, b, U per slot, on device
+        self._free_slots = list(range(cache_size))
         sp = spec
         if sp.base == "zero":
             self.static_base = LinearEnergyBase(np.zeros((self.n_max, self.n_max)),
@@ -217,33 +219,47 @@ class GraphPool:
             out.update(prior_U=U.float().to(self.device),
                        prior_std=(1.0 / (2 * bev)).sqrt().float().to(self.device),
                        prior_mean=(-gamma * (U @ ((U.T @ c) / bev))).float().to(self.device))
+        if len(self.cache) >= self.cache_size:
+            _, old = self.cache.popitem(last=False)
+            self._free_slots.append(old["slot"])
+        if "theta" in out:
+            self._write_bank(out)
         self.cache[gi] = out
-        if len(self.cache) > self.cache_size:
-            self.cache.popitem(last=False)
         return out
+
+    def _write_bank(self, p):
+        nm, dev = self.n_max, self.device
+        if self._bank is None:
+            self._bank = {"theta": torch.zeros(self.cache_size, nm, device=dev),
+                          "b": torch.zeros(self.cache_size, nm, device=dev),
+                          "U": (torch.eye(nm, device=dev).repeat(self.cache_size, 1, 1)
+                                if p["U"] is not None else None)}
+        k, n = self._free_slots.pop(), p["n"]
+        p["slot"] = k
+        bk = self._bank
+        bk["theta"][k].zero_()
+        bk["b"][k].zero_()
+        bk["theta"][k, :n] = p["theta"].to(dev, torch.float32)
+        bk["b"][k, :n] = p["b"].to(dev, torch.float32)
+        if bk["U"] is not None:
+            bk["U"][k] = torch.eye(nm, device=dev)
+            bk["U"][k, :n, :n] = p["U"]
 
     def base_ctx(self, gids, grouped: int = 1):
         """Reference process for samples on gids. grouped = K means gids lists each graph once
         and every graph carries K consecutive samples."""
         if self.static_base is not None:
             return self.static_base
-        nm, dev = self.n_max, self.device
-        ps = [self._graph_params(int(g)) for g in gids]
-        G = len(ps)
-        th = torch.zeros(G, nm, dtype=torch.float64)
-        bb = torch.zeros(G, nm, dtype=torch.float64)
-        for k, p in enumerate(ps):
-            th[k, :p["n"]] = p["theta"]
-            bb[k, :p["n"]] = p["b"]
-        U = None
-        if ps[0]["U"] is not None:
-            U = torch.eye(nm, device=dev).repeat(G, 1, 1)
-            for k, p in enumerate(ps):
-                U[k, :p["n"], :p["n"]] = p["U"].to(dev)
+        dev = self.device
+        assert len(set(int(g) for g in gids)) <= self.cache_size, "cache smaller than batch"
+        slots = torch.as_tensor([self._graph_params(int(g))["slot"] for g in gids], device=dev)
+        bk = self._bank
+        th, bb = bk["theta"][slots], bk["b"][slots]
+        U = None if bk["U"] is None else bk["U"][slots]
         if grouped > 1:
             th = th.repeat_interleave(grouped, 0)
             bb = bb.repeat_interleave(grouped, 0)
-        return BatchedLinearBase(th.to(dev), bb.to(dev), U, self.spec.sigma, dev)
+        return BatchedLinearBase(th, bb, U, self.spec.sigma, dev)
 
     # ---- sources ---------------------------------------------------------------
     def sample_source(self, gids, grouped: int, mask):
@@ -289,6 +305,7 @@ class AmortizedConfig:
     save_at: tuple = ()
     kl_graphs: int = 16
     seed: int = 0
+    sim_chunk: int = 64             # samples per network call during simulation (memory)
 
 
 class GraphBuffer:
@@ -355,6 +372,17 @@ class AmortizedTrainer:
     # ---- simulation -------------------------------------------------------------
     @torch.no_grad()
     def simulate(self, gids, K, steps, controlled=True):
+        """K trajectories on each graph of gids, simulated in chunks of whole graphs."""
+        gids = np.asarray(gids)
+        per = max(1, self.cfg.sim_chunk // K)
+        parts = [self._simulate_chunk(gids[i:i + per], K, steps, controlled)
+                 for i in range(0, len(gids), per)]
+        if len(parts) == 1:
+            return parts[0]
+        b = self.pool.batch(np.repeat(gids, K))
+        return (b,) + tuple(torch.cat([p[k] for p in parts]) for k in (1, 2, 3))
+
+    def _simulate_chunk(self, gids, K, steps, controlled):
         b = self.pool.batch(np.repeat(gids, K))
         base = self.pool.base_ctx(gids, grouped=K)
         x0 = self.pool.sample_source(gids, K, b.mask.float())
