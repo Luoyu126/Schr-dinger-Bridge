@@ -21,7 +21,7 @@ from sbmis.asbs import ASBSConfig, ASBSTrainer  # noqa: E402
 from sbmis.base.linear_energy_base import build_base  # noqa: E402
 from sbmis.energies.mis import MISEnergy  # noqa: E402
 from sbmis.evaluate import Decoder, discrete_metrics, mis_metrics, tv_noise_floor  # noqa: E402
-from sbmis.graphs import exact_mis_size, get_graph  # noqa: E402
+from sbmis.graphs import best_known_mis, get_graph  # noqa: E402
 from sbmis.models.nets import build_net  # noqa: E402
 
 
@@ -58,6 +58,8 @@ def parse():
     ap.add_argument("--eval_every", type=int, default=1, help="stages")
     ap.add_argument("--eval_samples", type=int, default=None)
     ap.add_argument("--ref", default=None, help="U1 reference .pt (small graphs)")
+    ap.add_argument("--opt_size", type=int, default=None,
+                    help="override the best-known MIS size used for gap metrics")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", required=True)
     return ap.parse_args()
@@ -95,12 +97,17 @@ def main():
         ref = torch.load(a.ref)
         s = ref["summary"]
         assert s["graph"] == a.graph and s["kappa_w"] == a.kappa_w and s["temp"] == a.temp
+        assert s.get("lambda_p", 2.0) == a.lambda_p, "reference built with a different lambda_p"
         n_eval = a.eval_samples or 20_000
         ref["tv_floor"] = tv_noise_floor(ref["p"], n_eval)
-        opt = s["mis_size"]
+        opt, opt_info = s["mis_size"], {"size": s["mis_size"], "proven_optimal": True}
     else:
         n_eval = a.eval_samples or 1024
-        opt = exact_mis_size(adj)[0] if n <= 400 else None
+        if a.opt_size is not None:
+            opt_info = {"size": a.opt_size, "proven_optimal": None, "source": "--opt_size"}
+        else:  # cached once per graph so every run uses the same denominator
+            opt_info = best_known_mis(a.graph, adj)
+        opt = opt_info["size"]
 
     def eval_fn(tr):
         res = {}
@@ -115,6 +122,7 @@ def main():
         return res
 
     meta = {"args": vars(a), "cfg": asdict(cfg), "n": n, "n_edges": en.n_edges, "opt_size": opt,
+            "opt_info": opt_info,
             "rho_effective": base.rho, "lam": base.lam, "alpha_eff": None,
             "n_params": sum(p.numel() for p in u.parameters())}
     if ref is not None:

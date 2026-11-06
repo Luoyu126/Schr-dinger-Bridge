@@ -94,3 +94,106 @@ def exact_mis_size(adj: np.ndarray, time_limit: float = 600.0) -> tuple[int, np.
     assert is_independent(adj, x)
     assert len(iu) == 0 or np.all(x[iu[:, 0]] + x[iu[:, 1]] <= 1)
     return int(x.sum()), x, bool(res.status == 0)
+
+
+def local_search_mis(adj: np.ndarray, restarts: int = 20, iters: int = 20_000,
+                     seed: int = 0) -> np.ndarray:
+    """Iterated local search with (1,2)-swaps (ARW-style), multi-restart.
+
+    Deterministic given `seed`. Returns the best independent set found (0/1 vector).
+    """
+    n = adj.shape[0]
+    nbrs = [np.nonzero(adj[i])[0] for i in range(n)]
+    deg = adj.sum(1)
+    rng = np.random.default_rng(seed)
+    best = np.zeros(n, dtype=np.int64)
+
+    def greedy(order):
+        s = np.zeros(n, dtype=np.int64)
+        tight = np.zeros(n, dtype=np.int64)  # number of solution neighbours
+        for v in order:
+            if s[v] == 0 and tight[v] == 0:
+                s[v] = 1
+                tight[nbrs[v]] += 1
+        return s, tight
+
+    def add(s, tight, v):
+        s[v] = 1
+        tight[nbrs[v]] += 1
+
+    def remove(s, tight, v):
+        s[v] = 0
+        tight[nbrs[v]] -= 1
+
+    for r in range(restarts):
+        order = np.lexsort((rng.random(n), deg))  # min-degree greedy, random ties
+        s, tight = greedy(order)
+        cur_best = s.copy()
+        for _ in range(iters):
+            improved = False
+            for v in rng.permutation(np.nonzero(s)[0]):
+                # free candidates: neighbours of v whose only solution neighbour is v
+                cand = [w for w in nbrs[v] if s[w] == 0 and tight[w] == 1]
+                if len(cand) < 2:
+                    continue
+                cand = rng.permutation(cand)
+                pair = None
+                for i in range(len(cand)):
+                    for j in range(i + 1, len(cand)):
+                        if adj[cand[i], cand[j]] == 0:
+                            pair = (cand[i], cand[j])
+                            break
+                    if pair:
+                        break
+                if pair:
+                    remove(s, tight, v)
+                    add(s, tight, pair[0])
+                    add(s, tight, pair[1])
+                    for w in rng.permutation(n):  # re-maximalise
+                        if s[w] == 0 and tight[w] == 0:
+                            add(s, tight, w)
+                    improved = True
+                    break
+            if s.sum() > cur_best.sum():
+                cur_best = s.copy()
+            if not improved:
+                # perturbation: force in a random non-solution vertex
+                v = int(rng.choice(np.nonzero(s == 0)[0]))
+                for w in nbrs[v]:
+                    if s[w]:
+                        remove(s, tight, w)
+                add(s, tight, v)
+                for w in rng.permutation(n):
+                    if s[w] == 0 and tight[w] == 0:
+                        add(s, tight, w)
+        if cur_best.sum() > best.sum():
+            best = cur_best
+    assert is_independent(adj, best)
+    return best
+
+
+def best_known_mis(spec: str, adj: np.ndarray, cache_dir: str = "data/cache",
+                   milp_time_limit: float = 1800.0) -> dict:
+    """Best known MIS size for a graph, computed once and cached (shared by all runs).
+
+    Returns {"size", "proven_optimal", "milp_size", "ls_size"}. The MILP time limit is
+    wall-clock, so the cached value (not a per-run recomputation) is what makes gap
+    metrics comparable across runs. A file lock serialises concurrent first calls.
+    """
+    import fcntl
+    import json
+    from pathlib import Path
+
+    d = Path(cache_dir)
+    d.mkdir(parents=True, exist_ok=True)
+    f = d / f"mis_{spec.replace(':', '_')}.json"
+    with open(d / f".{f.name}.lock", "w") as lk:
+        fcntl.flock(lk, fcntl.LOCK_EX)
+        if f.exists():
+            return json.loads(f.read_text())
+        m_size, _, proven = exact_mis_size(adj, time_limit=milp_time_limit)
+        ls = int(local_search_mis(adj).sum()) if not proven else m_size
+        out = {"size": max(m_size, ls), "proven_optimal": bool(proven),
+               "milp_size": m_size, "ls_size": ls, "milp_time_limit": milp_time_limit}
+        f.write_text(json.dumps(out))
+        return out
