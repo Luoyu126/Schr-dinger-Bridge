@@ -164,3 +164,41 @@ def test_amortized_trainer_smoke(tmp_path, kw):
 def test_amortized_adjoint_sampling_mode(tmp_path):
     tr, summ = _tiny_trainer(tmp_path, analytic=True, base="zero", source="delta")
     assert summ["status"] == "ok" and summ["grad_calls"] == 2 * 2 * 12
+
+
+@pytest.mark.parametrize("base", ["zero", "vp", "linear_energy_shift", "iso_ou"])
+@pytest.mark.parametrize("source", ["gauss", "energy_prior"])
+def test_cache_eviction_with_more_graphs_than_slots(base, source):
+    """The LRU cache must evict cleanly (and recompute identically) for every base/source."""
+    kw = dict(base=base, source=source, rho=4.0)
+    if base == "iso_ou":
+        if source != "gauss":
+            return
+        kw["iso_match_rho"] = 4.0
+    pool = GraphPool(_gset(), ProblemSpec(**kw), device="cpu", cache_size=2)
+    gl = np.arange(6)
+    m = pool.batch(np.repeat(gl, 2)).mask.float()
+    first = pool.base_ctx(gl[:1])
+    for _ in range(2):
+        for g in gl:
+            pool.base_ctx(np.array([g]))
+            pool.sample_source(np.array([g]), 2, m[:2])
+    again = pool.base_ctx(gl[:1])
+    if hasattr(first, "theta"):
+        assert torch.equal(first.theta, again.theta) and torch.equal(first.b, again.b)
+    assert len(pool.cache) <= 2
+
+
+def test_decode_metrics_best_of_matches_single_instance_definition():
+    from sbmis.evaluate import Decoder, mis_metrics
+    pool = _pool()
+    torch.manual_seed(5)
+    K = 32
+    b = pool.batch(np.repeat(np.array([3]), K))
+    x = torch.randn(K, pool.n_max) * b.mask
+    n = int(pool.g.n[3])
+    en, _ = _single(pool, 3)
+    ref = mis_metrics(x[:, :n], en, Decoder(pool.g.adj(3), device="cpu"))
+    got = decode_metrics(pool, b, x, K, None)
+    assert abs(got["best_of_16"] - ref["best_of_16"]) < 1e-6
+    assert abs(got["mis_size_mean"] - ref["mis_size_mean"]) < 1e-6
