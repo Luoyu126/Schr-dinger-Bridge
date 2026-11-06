@@ -7,9 +7,13 @@ energy-gradient calls; only the reference process / source changes):
                       on the same constant-sigma base. B0-S (geometric VE) is not run: the
                       quick screen (runs/s5_ve) had it clearly behind B0 for every
                       (sigma_min, sigma_max) tried, independent of the number of steps.
-  drift, no info      VP (official VPSDE, beta 20 -> 0.1), iso4 / iso8 (f = -theta x with the
-                      u = 0 terminal variance of B1+ at rho = 4 / 8), rot4 / rot8 (B1+
-                      conjugated by a random rotation: same spectrum, graph alignment lost)
+  drift, no info      VP (official VPSDE, beta 20 -> 0.1; under a time change a near-memoryless
+                      OU with theta = 5.03), iso4 / iso8 (f = -theta x with the u = 0 terminal
+                      variance of B1+ at rho = 4 / 8), iso4m2 / iso8m2 (same, matched on the
+                      second moment E|X_1|^2 / n, which includes B1+'s terminal mean), rot4 / rot8
+                      (B1+ conjugated by a Haar rotation drawn per seed: same spectrum, graph
+                      alignment lost; caveat: the rotated optimal u, h are not functions of the
+                      graph, so the GNN is also handicapped there)
   info in the source  B0+prior4 / B0+prior8 (f = 0, mu ∝ N(0,I) exp(-2 gamma E'_quad),
                       gamma_rel = 4 / 8), B1p4+prior4 (both)
   negative control    B1_rho-2
@@ -20,7 +24,10 @@ energy-gradient calls; only the reference process / source changes):
 U1 graphs g0, g1, g2: lr 1e-4, 40 stages (614400 calls), TV to the PT-MALA reference.
 n = 100 instances er:100:0.15:{0,1,2}: lr 3e-4, 20 stages (307200 calls), plus B1_rho8 with
 one seed (plan U2). 3 seeds. Order: g2, n100 instance 0, g0, g1, n100 instances 1, 2;
-within a block seed 0 of every group first.
+within a block seed 0 of every group first. Then a learning-rate robustness block (the
+shared lr was tuned on B0 / B1): every group with seed 0 at lr 3e-4 on g2 and lr 1e-4 on
+n100 instance 0 (runs/main_ref/g2_lr, runs/main_ref/n100i0_lr).
+Evaluations happen every 2 stages (30720 calls); all budgets and checkpoints sit on that grid.
 
 python scripts/sweeps/main_reference.py   -> runs/main_ref/jobs.tsv
 """
@@ -35,6 +42,8 @@ GROUPS = {
     "VP": dict(base="vp"),
     "iso4": dict(base="iso_ou", iso_match_rho=4),
     "iso8": dict(base="iso_ou", iso_match_rho=8),
+    "iso4m2": dict(base="iso_ou", iso_match_rho=4, iso_match="m2"),
+    "iso8m2": dict(base="iso_ou", iso_match_rho=8, iso_match="m2"),
     "rot4": dict(base="linear_energy_shift_rot", rho=4),
     "rot8": dict(base="linear_energy_shift_rot", rho=8),
     "B0+prior4": dict(base="zero", source="energy_prior", prior_gamma=4),
@@ -48,18 +57,18 @@ SEEDS = (0, 1, 2)
 U1 = dict(kappa_w=2, temp=0.5, net="gnn", lr=1e-4, stages=40, eval_every=2,
           n_infer_steps="100 20", save_at="153600 307200 614400")
 N100 = dict(kappa_w=2, temp=0.5, net="gnn", lr=3e-4, stages=20, eval_every=2,
-            n_infer_steps="20 100", save_at="76800 153600 307200")
-U1_BUDGETS = "30720 76800 153600 307200 460800 614400"
-N100_BUDGETS = "30720 76800 153600 230400 307200"
+            n_infer_steps="20 100", save_at="61440 153600 307200")
+U1_BUDGETS = "30720 61440 153600 307200 460800 614400"
+N100_BUDGETS = "30720 61440 153600 245760 307200"
 
 
 def fmt(kw):
     return " ".join(f"--{k}" if v is True else f"--{k} {v}" for k, v in kw.items())
 
 
-def asbs_jobs(tag, graph, common, extra_ref=""):
+def asbs_jobs(tag, graph, common, extra_ref="", seeds=SEEDS):
     jobs = []
-    for s in SEEDS:
+    for s in seeds:
         for name, g in GROUPS.items():
             out = f"{ROOT}/{tag}/{name}_s{s}"
             jobs.append((f"{tag}__{name}__s{s}",
@@ -96,6 +105,10 @@ def main():
                          f"{PY} scripts/train_mis.py --graph {graph} {fmt(N100)}"
                          f" --base linear_energy --rho 8 --seed 0 --out {ROOT}/{tag}/B1_rho8_s0"))
             jobs += mala_jobs(tag, graph, N100_BUDGETS, (1024,))
+    # learning-rate robustness (the shared lr was tuned on B0 / B1): seed 0, other lr
+    jobs += asbs_jobs("g2_lr", "g2", {**U1, "lr": 3e-4}, " --ref runs/u1_ref/g2_k2_T0.5.pt",
+                      seeds=(0,))
+    jobs += asbs_jobs("n100i0_lr", "er:100:0.15:0", {**N100, "lr": 1e-4}, seeds=(0,))
     Path(ROOT).mkdir(parents=True, exist_ok=True)
     (Path(ROOT) / "jobs.tsv").write_text("".join(f"{n}\t{c}\n" for n, c in jobs))
     print(len(jobs), "jobs ->", Path(ROOT) / "jobs.tsv")
