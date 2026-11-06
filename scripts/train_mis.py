@@ -41,9 +41,14 @@ def parse():
     ap.add_argument("--sigma", type=float, default=1.0,
                     help="constant sigma; sigma_max for ve_geometric; stationary std for vp")
     ap.add_argument("--sigma_min", type=float, default=0.01, help="ve_geometric only")
-    ap.add_argument("--rot_seed", type=int, default=0, help="linear_energy_shift_rot only")
+    ap.add_argument("--ve_euler", action="store_true",
+                    help="ve_geometric: official left-point Euler step instead of the exact one")
+    ap.add_argument("--rot_seed", type=int, default=None,
+                    help="linear_energy_shift_rot: rotation seed (default: --seed)")
     ap.add_argument("--iso_match_rho", type=float, default=None,
-                    help="iso_ou: match the u=0 terminal variance of B1+ at this rho")
+                    help="iso_ou: match the u=0 terminal spread of B1+ at this rho")
+    ap.add_argument("--iso_match", choices=["var", "m2"], default="var",
+                    help="iso_ou: match the centred variance or the second moment")
     ap.add_argument("--vp_beta0", type=float, default=20.0)
     ap.add_argument("--vp_beta1", type=float, default=0.1)
     ap.add_argument("--source", choices=["gauss", "delta", "energy_prior"], default="gauss")
@@ -94,14 +99,21 @@ def main():
     dev = "cuda"
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
-    for f in ("log.jsonl", "summary.json", "epochs.jsonl"):
+    for f in ("log.jsonl", "summary.json", "epochs.jsonl", "final.pt"):
         (out / f).unlink(missing_ok=True)
+    for f in out.glob("ckpt_*.pt"):  # never mix checkpoints of an earlier attempt
+        f.unlink()
+    if a.iso_match_rho is not None:
+        assert a.base == "iso_ou" and a.source == "gauss", \
+            "the iso-OU spread match is defined for an isotropic N(0, source_std^2) source"
 
     adj = get_graph(a.graph)
     n = adj.shape[0]
     en = MISEnergy(adj, a.lambda_p, a.kappa_w, a.temp, device=dev)
     base = build_base(a.base, en, sigma=a.sigma, rho=a.rho, device=dev, sigma_min=a.sigma_min,
-                      rot_seed=a.rot_seed, iso_match_rho=a.iso_match_rho,
+                      ve_euler=a.ve_euler,
+                      rot_seed=a.seed if a.rot_seed is None else a.rot_seed,
+                      iso_match_rho=a.iso_match_rho, iso_match=a.iso_match,
                       source_std=a.source_std, vp_beta0=a.vp_beta0, vp_beta1=a.vp_beta1)
     source = build_source(a.source, en, std=a.source_std, gamma_rel=a.prior_gamma)
     kw = {k: v for k, v in (("hidden", a.hidden), ("layers", a.layers)) if v is not None}
