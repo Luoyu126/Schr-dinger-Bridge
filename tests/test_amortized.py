@@ -162,9 +162,39 @@ def test_amortized_trainer_smoke(tmp_path, kw):
     assert (tmp_path / "ckpt_24.pt").exists() and (tmp_path / "final.pt").exists()
 
 
-def test_amortized_adjoint_sampling_mode(tmp_path):
-    tr, summ = _tiny_trainer(tmp_path, analytic=True, base="zero", source="delta")
+@pytest.mark.parametrize("kw", [dict(base="zero"), dict(base="linear_energy_shift", rho=4.0),
+                                dict(base="linear_energy_shift", rho=2.0)],
+                         ids=["B0", "B1p4", "B1p2"])
+def test_amortized_adjoint_sampling_mode(tmp_path, kw):
+    tr, summ = _tiny_trainer(tmp_path, analytic=True, source="delta", **kw)
     assert summ["status"] == "ok" and summ["grad_calls"] == 2 * 2 * 12
+
+
+@pytest.mark.parametrize("kw", [dict(base="zero"), dict(base="linear_energy_shift", rho=4.0),
+                                dict(base="linear_energy", rho=2.0)],
+                         ids=["B0", "B1p4", "B1_2"])
+def test_analytic_corrector_is_terminal_score_for_any_base(kw):
+    """With a Dirac source X0 = 0 every reference process is memoryless, so the corrector is
+    grad log p_1^base(x1) with p_1^base = N(m, U diag(v) U^T) the base transition from 0 over
+    [0, 1]. Checked by autodiff of that Gaussian log-density, per graph, on a padded batch."""
+    torch.manual_seed(3)
+    pool = _pool(source="delta", **kw)
+    gids = np.array([1, 4, 4, 2])
+    b = pool.batch(gids)
+    m = b.mask.to(torch.float32)
+    x1 = torch.randn(b.S, pool.n_max) * 1.5 * m
+    h = AnalyticCorrectorAmortized(pool)(torch.ones(b.S), x1.reshape(-1), b).reshape(b.S, -1)
+    for s, gi in enumerate(gids):
+        _, sb = _single(pool, gi)
+        n = int(pool.g.n[gi])
+        mean, var = sb.transition_mean_var(torch.zeros(1, n, dtype=F64), 1.0)
+        U = torch.eye(n, dtype=F64) if sb.identity else sb.U64
+        cov = U @ torch.diag(var.reshape(-1).expand(n)) @ U.T
+        x = x1[s:s + 1, :n].double().requires_grad_(True)
+        logp = torch.distributions.MultivariateNormal(mean[0], covariance_matrix=cov).log_prob(x)
+        want, = torch.autograd.grad(logp.sum(), x)
+        assert (h[s, :n].double() - want[0]).abs().max() / want.abs().max() < 2e-4, s
+        assert (h[s, n:] == 0).all()
 
 
 @pytest.mark.parametrize("base", ["zero", "vp", "linear_energy_shift", "iso_ou"])
