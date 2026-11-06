@@ -221,7 +221,8 @@ class GraphPool:
                        prior_mean=(-gamma * (U @ ((U.T @ c) / bev))).float().to(self.device))
         if len(self.cache) >= self.cache_size:
             _, old = self.cache.popitem(last=False)
-            self._free_slots.append(old["slot"])
+            if "slot" in old:  # only graph-dependent bases own a bank slot
+                self._free_slots.append(old["slot"])
         if "theta" in out:
             self._write_bank(out)
         self.cache[gi] = out
@@ -244,6 +245,7 @@ class GraphPool:
         if bk["U"] is not None:
             bk["U"][k] = torch.eye(nm, device=dev)
             bk["U"][k, :n, :n] = p["U"]
+        p["U"] = None  # the bank holds the only device copy
 
     def base_ctx(self, gids, grouped: int = 1):
         """Reference process for samples on gids. grouped = K means gids lists each graph once
@@ -369,6 +371,17 @@ class AmortizedTrainer:
             out = net(t, x.reshape(-1), b)
         return out.float().reshape(b.S, -1) * b.mask
 
+    @torch.no_grad()
+    def _chunked_net(self, net, t, x, b):
+        """_net over whole-graph chunks of about sim_chunk samples (bounded memory)."""
+        K = self.cfg.samples_per_graph
+        per = max(1, self.cfg.sim_chunk // K) * K
+        if b.S <= per:
+            return self._net(net, t, x, b)
+        outs = [self._net(net, t[i:i + per], x[i:i + per], self.pool.batch(b.gids[i:i + per]))
+                for i in range(0, b.S, per)]
+        return torch.cat(outs)
+
     # ---- simulation -------------------------------------------------------------
     @torch.no_grad()
     def simulate(self, gids, K, steps, controlled=True):
@@ -423,7 +436,7 @@ class AmortizedTrainer:
         self._clip_total += b.S
         g = g * torch.clamp(alpha / (norm + 1e-6), max=1.0)[:, None]
         if not init or cfg.fixed_corrector:
-            g = g + self._net(self.h, torch.ones(b.S, device=self.device), x1, b)
+            g = g + self._chunked_net(self.h, torch.ones(b.S, device=self.device), x1, b)
         self.buf_am.add(gid=torch.as_tensor(b.gids, device=self.device), x0=x0, x1=x1, a1=g)
 
     @torch.no_grad()
@@ -577,14 +590,20 @@ def decode_metrics(pool: GraphPool, b, x, K: int, opt: dict | None = None) -> di
         sol = dec.extend(dec.repair(s_raw))
         size = sol.sum(-1)
         r = {"mis_size_mean": float(size.mean()), "best_of_K": float(size.max()),
+             # same definitions as sbmis.evaluate.mis_metrics (groups of k samples)
+             **{f"best_of_{k}": float(size[: (K // k) * k].view(-1, k).max(1).values.mean())
+                for k in (1, 16) if K >= k},
              "raw_feasible_frac": float((conf == 0).float().mean()),
              "raw_conflict_edge_frac": float((conf / max(dec.n_edges, 1)).mean()),
              "raw_size_mean": float(s_raw.sum(-1).mean()),
-             "n_distinct": int(torch.unique(sol, dim=0).shape[0])}
+             "n_distinct": int(torch.unique(sol, dim=0).shape[0]),
+             "n_distinct_64": int(torch.unique(sol[:64], dim=0).shape[0])}
         if opt is not None:
             o = opt[int(g)]["size"]
             r.update(gap_mean=float(1 - size.mean() / o), gap_best=float(1 - size.max() / o),
                      ratio_mean=float(size.mean() / o), ratio_best=float(size.max() / o))
+            if K >= 16:
+                r["ratio_best_of_16"] = r["best_of_16"] / o
         rows.append(r)
     out = {k: float(np.mean([r[k] for r in rows])) for k in rows[0]}
     out["n_graphs"] = len(rows)
