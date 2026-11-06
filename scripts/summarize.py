@@ -81,7 +81,10 @@ def main():
         if summ is None and str(run).rstrip("/") not in live:
             summ = {"status": "crash"}  # no summary and no live process writing to it
         args = meta["args"]
-        key = tuple(sorted((k, str(v)) for k, v in args.items() if k not in IGNORE))
+        # None-valued args are dropped so runs made before a new optional flag existed
+        # group with later runs that leave it unset
+        key = tuple(sorted((k, str(v)) for k, v in args.items()
+                           if k not in IGNORE and v is not None))
         groups[key].append((args["seed"], recs, summ))
     budgets = a.at or sorted({r["grad_calls"] for g in groups.values() for _, rs, _ in g
                               for r in rs if a.metrics[0] in r})[-1:]
