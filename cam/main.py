@@ -5,6 +5,7 @@ import torch
 import numpy as np
 from pathlib import Path
 from solvers import *
+from solvers.cam_prior import CAMPrior, add_cam_prior_args  # local addition (see UPSTREAM.md)
 
 def set_seed(seed):
     random.seed(seed)
@@ -90,6 +91,7 @@ def main():
     parser.add_argument("--inner_loop_steps", type=int, default=1, help='inner loop steps')
     parser.add_argument("--batches_per_step", type=int, default=None, help='max batches from batch_loader per inner loop step; None means all batches')
 
+    add_cam_prior_args(parser)  # local addition (see UPSTREAM.md): --prior_* flags of CAMPrior
     args = parser.parse_args()
     if args.do_train and int(os.environ.get("LOCAL_RANK", 0)) == 0 and os.path.isdir(args.save_dir):
         ckpts = list(Path(args.save_dir).glob('*.pt'))
@@ -110,6 +112,8 @@ def main():
         solver = RLNN(args)
     elif args.method == 'CAM':
         solver = CAM(args)
+    elif args.method == 'CAMPrior':
+        solver = CAMPrior(args)
     elif args.method == 'RLSA':
         solver = RLSA(args)
     elif args.method == 'FM':
