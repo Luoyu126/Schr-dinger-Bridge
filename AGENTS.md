@@ -31,8 +31,8 @@ Guidelines for any AI coding agent working in this repository.
 
 ## Filesystem access
 
-- Only read, write, or create files under `/usr0/home/shengyuf/yunyi/`. Never touch anything outside it.
-- This also covers temporary files, caches, cloned reference repos, logs, checkpoints, and experiment outputs. Put them under `/usr0/home/shengyuf/yunyi/` (for example a git-ignored directory in this repo), not in `/tmp` or elsewhere in the home directory.
+- You may read files anywhere on the machine, but only write, create, or delete files under `/usr0/home/shengyuf/yunyi/`. Never modify anything outside it.
+- Writes include temporary files, caches, cloned reference repos, logs, checkpoints, and experiment outputs. Put them under `/usr0/home/shengyuf/yunyi/` (for example a git-ignored directory in this repo), not in `/tmp` or elsewhere in the home directory.
 
 ## Python environments
 
