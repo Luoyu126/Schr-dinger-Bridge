@@ -134,6 +134,26 @@ def tv_noise_floor(ref_p: torch.Tensor, n_samples: int, reps: int = 5, seed: int
     return float(np.mean(vals))
 
 
+def group_tv_noise_floor(ref_p: torch.Tensor, n_per_group: int, n_groups: int,
+                         reps: int = 5, seed: int = 0) -> float:
+    """Expected max pairwise TV between n_groups iid empirical histograms of n_per_group draws.
+
+    This is the iid baseline for the PT-MALA convergence statistic `group_tv_max`;
+    (floor / observed)^2 estimates the effective-sample fraction of the correlated draws.
+    """
+    g = torch.Generator().manual_seed(seed)
+    p = ref_p.double().cpu()
+    vals = []
+    for _ in range(reps):
+        hs = []
+        for _ in range(n_groups):
+            idx = torch.multinomial(p, n_per_group, replacement=True, generator=g)
+            hs.append(torch.bincount(idx, minlength=p.numel()).double() / n_per_group)
+        vals.append(max(0.5 * (hs[a] - hs[b]).abs().sum().item()
+                        for a in range(n_groups) for b in range(a + 1, n_groups)))
+    return float(np.mean(vals))
+
+
 def feasible_mask_all(adj: np.ndarray) -> torch.Tensor:
     """Boolean over all 2^n codes: is the pattern an independent set."""
     n = adj.shape[0]

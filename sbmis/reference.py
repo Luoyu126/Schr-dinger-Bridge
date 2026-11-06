@@ -6,8 +6,11 @@ T = T_0 < T_1 < ... < T_K. Step sizes are adapted per level during burn-in
 hard-decision pattern sign(x) are collected at the target level.
 
 Convergence check: chains are split into `n_groups` independent groups; the
-max pairwise TV between group histograms is compared to the TV expected from
-sampling noise alone (same number of effective draws).
+max pairwise TV between group histograms is compared to the same statistic for
+iid draws of the same count (evaluate.group_tv_noise_floor). Because the draws
+are autocorrelated, observed > floor is expected; (floor / observed)^2 is a
+rough effective-sample fraction, and the residual error of the pooled
+histogram is about observed / sqrt(2 * n_groups).
 """
 from __future__ import annotations
 
@@ -91,6 +94,7 @@ def pt_mala(energy, n_chains=4096, n_levels=10, t_max_factor=8.0, burn=4000, n_s
         "group_tv_max": max(tvs) if tvs else 0.0,
         "n_draws": int(hist.sum().item()),
         "n_draws_per_group": int(hist[0].sum().item()),
+        "n_groups": n_groups,
     }
 
 
