@@ -15,6 +15,10 @@ Input: the node scalar x_i through DIFUSCO's ScalarEmbeddingSine1D and a linear 
 through the sinusoidal timestep embedding (t in [0, 1] is scaled by 1000 to DIFUSCO's step
 range) and a 2-layer MLP. Edge states start at zero.
 
+Like DIFUSCO's MISDataset, every node gets a self-loop in the GNN's edge list
+(`self_loops=True`): a gated self-message with its own edge state. The energy never sees
+these loops (they are added inside the network).
+
 Deviations, all required by ASBS and kept minimal:
   * torch_sparse is replaced by index_add_ (same sum aggregation);
   * several independent samples (each with its own graph and time) are batched as one
@@ -83,10 +87,11 @@ class DifuscoGNN(nn.Module):
     """
 
     def __init__(self, hidden: int = 256, n_layers: int = 12, time_scale: float = 1000.0,
-                 activation_checkpoint: bool = False):
+                 activation_checkpoint: bool = False, self_loops: bool = True):
         super().__init__()
         self.hidden, self.time_scale = hidden, time_scale
         self.activation_checkpoint = activation_checkpoint
+        self.self_loops = self_loops
         t_dim = hidden // 2
         self.node_embed = nn.Linear(hidden, hidden)
         self.time_embed = nn.Sequential(nn.Linear(hidden, t_dim), nn.ReLU(), nn.Linear(t_dim, t_dim))
@@ -106,6 +111,9 @@ class DifuscoGNN(nn.Module):
 
     def forward(self, t: torch.Tensor, x: torch.Tensor, batch) -> torch.Tensor:
         src, dst, n2s = batch.src, batch.dst, batch.node2sample
+        if self.self_loops:  # DIFUSCO's MISDataset appends (i, i) for every node
+            loops = torch.arange(x.shape[0], device=x.device)
+            src, dst = torch.cat([src, loops]), torch.cat([dst, loops])
         wd = self.node_embed.weight.dtype  # embeddings follow the parameter dtype
         h = self.node_embed(scalar_embedding_sine_1d(x, self.hidden).to(wd))
         e = torch.zeros(src.shape[0], self.hidden, device=x.device, dtype=h.dtype)
