@@ -233,6 +233,46 @@ base 配置：lr 3e-4，每 stage AM:CM=30:30 轮，20 个 stage，每轮新样�
   - 各向同性 OU（只加漂移、不带能量信息），用来判断好处是否来自能量信息；
   - B0+prior4（ASBS 的做法：把能量信息放进源分布）。
 
+### 0.8 三臂实验方案（2026-11-06 傍晚讨论中；与前文冲突时以本节为准）
+
+11-06 14:43 全部实验已停，按本节重新设计后再跑。
+
+**核心原则（用户）**：在无监督训练范式里，用能量模型修改参考过程，给采样器提供先验，从而提高训练效率。不限定在 ASBS 上。
+
+**三臂**：每一臂内部比较"基线 vs + 能量"，跨臂只比绝对的 MIS 指标。
+
+| 臂 | 基线 | + 能量 | 必要的对照 |
+|---|---|---|---|
+| AS（连续，单点源，解析 corrector） | AS，f=0 | AS + B1+ 参考过程 | — |
+| ASBS（连续，高斯源，学 corrector） | B0 | B1+ | 各向同性 OU、B0+prior4 |
+| CAM（离散） | CAM | CAM + RLSA 式能量翻转 logit 先验 + 网络残差 | RLSA 本身（只有先验、不训练）、CAM 只降 τ |
+
+- 公共基线：度数贪心、KaMIS 或 best-known。DiffUCO、SDDS 第一批只引用论文数字。DiffUCO + 能量第一批不跑。
+- 用户的理解：离散臂本质上是"RLSA 的信号 + CAM 的训练方式"。门槛是 RLSA：网络残差为 0 时采样器约等于 RLSA，训练后必须同预算地明显超过它。
+- **所有基线都必须在同一硬件、同一预算下实测，不能挑基线。** 起因是 CAM 的论文没有和 RLSA 比，而 RLSA 是同一作者组前一篇论文里不训练的方法，在 RB-[200-300] 上数字比 CAM 还高（`rld.txt` L461，`cam.txt` L398）。
+
+**代码与网络（学长建议）**
+- 学长原话：用 https://github.com/Shengyu-Feng/CAM ，"那个 AnGNN 一般"。公开仓库已克隆到 `ref/CAM`（只读）。仓库里有 RLSA、DiffUCO、SDDS、RLNN 的实现；数据和训练好的模型在 huggingface 的 `shengyuf/CAM_data` 和 `shengyuf/CAM_models`。
+- AnGNN 基本就是我们现在的 DIFUSCO 门控 GCN。CAM 在 MIS 上用的是 `EncodeProcessDecode`（ER 上是 8 层 × 64 维，不接收时间，关掉混合精度）。
+- 决定：三臂统一用 `EncodeProcessDecode` 系列。
+  - CAM 臂用原版（不带时间），配置照抄 CAM 脚本，先复现论文数字。
+  - AS 和 ASBS 臂用 `EncodeProcessDecodeTime2`（标量输入，每层加时间嵌入），需要：
+    - 输出层零初始化；
+    - 同一张图的 K 个样本各自作为一张图放进 batch，避免 GraphNorm 把不同样本混在一起；
+    - ASBS 的 corrector h 也用 `Time2`，t 固定为 1。
+- 接入方式（在 CAM 代码里加 solver，还是把网络搬进 sbmis）待定。
+
+**温度**
+- AS 和 ASBS 臂（用户决定）：对齐 AS 和 ASBS 论文本身的设定，并适当考虑 MIS：**固定温度、不退火，取值比 0.5 低**。具体值按 §0.7 的 CPU 标定选。
+- CAM 臂（建议，待确认）：照 CAM 原协议，τ 从 0.1 线性退火到 0。
+- 待定：ASBS 和 AS 论文用几何噪声日程，而我们的筛选里几何日程版本（B0-S）明显差于常数 σ（§0.6.1）。两者冲突，需要决定。
+
+**其余协议（建议，待确认）**
+- 主数据集 ER-[700-800]，用 CAM 的数据；ER-[200-300] 只当开发集。
+- 推理预算照 CAM：50 步 × 20 次采样，取最好的一次，报与 KaMIS 的差距。
+- 训练预算按能量梯度调用次数对齐，另报 wall-clock。
+- 每组 3 个种子。主终点和判据开跑前写定（参考 `runs/scratch/eff_review/critique.md` §4）。
+
 ---
 
 ## 1. 背景与要验证的假设
