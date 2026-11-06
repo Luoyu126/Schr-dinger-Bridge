@@ -53,6 +53,11 @@ class ASBSConfig:
     max_grad_calls: int | None = None
     eval_every_stages: int = 1
     explode_threshold: float = 1e4  # |x| above this counts as divergence
+    # EXPERIMENTAL (not in the plan): regress the network onto -a_1 and define the
+    # controller as u(t, x) = exp(-lam M (1 - t)) net(t, x). Same minimiser as the
+    # standard AM loss (E_t is deterministic), but per-direction reweighted so the
+    # targets are not amplified by exp(|theta|) along theta < 0 directions.
+    am_precond: bool = False
 
 
 class Buffer:
@@ -82,12 +87,25 @@ class Buffer:
             yield {k: v[j] for k, v in self.data.items()}
 
 
+class PrecondController(torch.nn.Module):
+    """u(t, x) = exp(-lam M (1 - t)) net(t, x)  (used with am_precond)."""
+
+    def __init__(self, net, base):
+        super().__init__()
+        self.net, self.base = net, base
+
+    def forward(self, t, x):
+        t = t.expand(x.shape[0], 1) if t.numel() == 1 else t
+        return self.base.lean_adjoint(self.net(t, x), t)
+
+
 class ASBSTrainer:
     def __init__(self, energy, base, controller, corrector, cfg: ASBSConfig,
                  device="cuda", out_dir: str | Path | None = None,
                  eval_fn: Callable | None = None, log=print):
         self.energy, self.base, self.cfg = energy, base, cfg
         self.u, self.h = controller.to(device), corrector.to(device)
+        self.u_sim = PrecondController(self.u, base) if cfg.am_precond else self.u
         self.device = torch.device(device)
         self.n = energy.dim
         self.opt = torch.optim.Adam([
@@ -103,6 +121,8 @@ class ASBSTrainer:
         self.t_start = time.time()
         self._clip_hits = 0
         self._clip_total = 0
+        self._diag: dict = {}
+        self._epoch = 0
 
     # ---------------------------------------------------------------- sampling
     @torch.no_grad()
@@ -113,7 +133,7 @@ class ASBSTrainer:
         self.u.eval()
         for j in range(steps):
             t, dt = ts[j], ts[j + 1] - ts[j]
-            v = self.u(torch.full((B, 1), t, device=self.device), x) if controlled else None
+            v = self.u_sim(torch.full((B, 1), t, device=self.device), x) if controlled else None
             x = self.base.step(x, t, dt, v=v)
             if return_traj:
                 traj.append(x)
@@ -147,6 +167,9 @@ class ASBSTrainer:
             if not init:
                 g = g + self.h(torch.ones(B, 1, device=self.device), x1)
             self.buf_am.add(x0=x0, x1=x1, a1=g)
+            self._diag["x1_absmax"] = max(self._diag.get("x1_absmax", 0.0), x1.abs().max().item())
+            self._diag["a1_normmax"] = max(self._diag.get("a1_normmax", 0.0),
+                                           torch.linalg.vector_norm(g, dim=-1).max().item())
 
     @torch.no_grad()
     def populate_cm(self, init: bool):
@@ -156,11 +179,14 @@ class ASBSTrainer:
             x0, x1 = self.simulate(B, cfg.n_train_steps, controlled=not init)
             self._check_finite(x1, "CM samples")
             self.buf_cm.add(x0=x0, x1=x1)
+            self._diag["x1_absmax"] = max(self._diag.get("x1_absmax", 0.0), x1.abs().max().item())
 
     def am_loss(self, d):
         B = d["x0"].shape[0]
         t = torch.rand(B, 1, device=self.device)
         xt = self.base.bridge_sample(t, d["x0"], d["x1"])
+        if self.cfg.am_precond:
+            return ((self.u(t, xt) + d["a1"]) ** 2).mean()
         target = -self.base.lean_adjoint(d["a1"], t)
         return ((self.u(t, xt) - target) ** 2).mean()
 
@@ -171,10 +197,11 @@ class ASBSTrainer:
 
     def train_epoch(self, stage: str, init: bool) -> float:
         cfg = self.cfg
+        self._diag = {}
         (self.populate_am if stage == "adjoint" else self.populate_cm)(init)
         buf = self.buf_am if stage == "adjoint" else self.buf_cm
         loss_fn = self.am_loss if stage == "adjoint" else self.cm_loss
-        tot = 0.0
+        tot, mx = 0.0, 0.0
         for d in buf.batches(cfg.train_batch, cfg.itr_per_epoch, cfg.duplicates):
             self.opt.zero_grad(set_to_none=True)
             loss = loss_fn(d)
@@ -186,6 +213,13 @@ class ASBSTrainer:
                     list(self.u.parameters()) + list(self.h.parameters()), cfg.grad_clip)
             self.opt.step()
             tot += loss.item()
+            mx = max(mx, loss.item())
+        self._epoch += 1
+        if self.out_dir:
+            with open(self.out_dir / "epochs.jsonl", "a") as f:
+                f.write(json.dumps({"epoch": self._epoch, "stage": stage,
+                                    "loss": tot / cfg.itr_per_epoch, "loss_max": mx,
+                                    **self._diag}) + "\n")
         return tot / cfg.itr_per_epoch
 
     # ---------------------------------------------------------------- main loop

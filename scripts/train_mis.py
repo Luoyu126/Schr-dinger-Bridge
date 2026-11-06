@@ -50,6 +50,8 @@ def parse():
     ap.add_argument("--buffer_size", type=int, default=10_000)
     ap.add_argument("--am_epochs", type=int, default=30)
     ap.add_argument("--cm_epochs", type=int, default=30)
+    ap.add_argument("--am_precond", action="store_true",
+                    help="EXPERIMENTAL: AM regression in a_1 space (same minimiser)")
     ap.add_argument("--init", choices=["cm_first", "am_first"], default="cm_first")
     ap.add_argument("--stages", type=int, default=20)
     ap.add_argument("--max_grad_calls", type=int, default=None)
@@ -68,7 +70,7 @@ def main():
     dev = "cuda"
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
-    for f in ("log.jsonl", "summary.json"):
+    for f in ("log.jsonl", "summary.json", "epochs.jsonl"):
         (out / f).unlink(missing_ok=True)
 
     adj = get_graph(a.graph)
@@ -85,7 +87,7 @@ def main():
         init_stage="corrector" if a.init == "cm_first" else "adjoint",
         lr=a.lr, grad_clip=a.grad_clip, alpha_max=a.alpha_max,
         alpha_sqrt_n_scale=not a.no_alpha_sqrt_n,
-        max_stages=a.stages, max_grad_calls=a.max_grad_calls, eval_every_stages=a.eval_every)
+        am_precond=a.am_precond, max_stages=a.stages, max_grad_calls=a.max_grad_calls, eval_every_stages=a.eval_every)
 
     dec = Decoder(adj, device=dev)
     ref = None
