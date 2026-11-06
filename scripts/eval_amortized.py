@@ -2,7 +2,8 @@
 
 For every run directory and checkpoint: K_max samples per test graph at each number of
 inference steps N; metrics for every K in --k (best-of-K uses the first K samples), plus
-sampling wall-clock per graph. Writes <run>/eval_<split>_<ckpt>.json.
+sampling wall-clock per graph. Writes <run>/eval_<split>_<ckpt>.json. Intermediate
+checkpoints (--ckpt ckpt_30720.pt ...) can be evaluated while the run is still training.
 
 python scripts/eval_amortized.py runs/amortized/er_200_300/*/ --split test --k 1 4 16 64 \
     --n_infer_steps 10 25 50 100
@@ -92,10 +93,21 @@ def main():
     for r in a.runs:
         run = Path(r)
         for c in a.ckpt:
-            if (run / c).exists() and (run / "summary.json").exists():
+            if ready(run, c):
                 evaluate_run(run, c, a.split, a.k, a.n_infer_steps, a.graphs_per_batch, a.max_graphs)
             else:
                 print(f"skip {run}/{c}: missing checkpoint or unfinished run", flush=True)
+
+
+def ready(run: Path, ckpt: str, settle_sec: float = 60.0) -> bool:
+    """final.pt only after the run finished; an intermediate ckpt_<calls>.pt once it has been
+    on disk for settle_sec (it is written in one torch.save while training goes on)."""
+    f = run / ckpt
+    if not f.exists():
+        return False
+    if ckpt == "final.pt":
+        return (run / "summary.json").exists()
+    return time.time() - f.stat().st_mtime > settle_sec
 
 
 if __name__ == "__main__":
