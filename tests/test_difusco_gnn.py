@@ -60,3 +60,21 @@ def test_fp16_autocast_runs():
     with torch.autocast("cuda", dtype=torch.float16):
         out = net(torch.rand(2, device="cuda"), torch.randn(b.n_nodes, device="cuda"), b)
     assert torch.isfinite(out).all()
+
+
+def test_activation_checkpoint_same_outputs_and_grads():
+    net = _net()
+    net_ck = _net()
+    net_ck.activation_checkpoint = True
+    b = make_batch(15, 3, device="cpu")
+    x, t = torch.randn(b.n_nodes, dtype=torch.float64), torch.rand(3)
+    outs, grads = [], []
+    for m in (net, net_ck):
+        out = m(t, x, b)
+        out.pow(2).sum().backward()
+        outs.append(out.detach())
+        # the last layer's edge update feeds nothing (as in DIFUSCO): its grads are None
+        grads.append(torch.cat([(p.grad if p.grad is not None else torch.zeros_like(p)).reshape(-1)
+                                for p in m.parameters()]))
+    assert (outs[0] - outs[1]).abs().max() < 1e-10
+    assert (grads[0] - grads[1]).abs().max() < 1e-8
