@@ -254,19 +254,19 @@ base 配置：lr 3e-4，每 stage AM:CM=30:30 轮，20 个 stage，每轮新样�
 **代码与网络（学长建议）**
 - 学长原话：用 https://github.com/Shengyu-Feng/CAM ，"那个 AnGNN 一般"。公开仓库已克隆到 `ref/CAM`（只读）。仓库里有 RLSA、DiffUCO、SDDS、RLNN 的实现；数据和训练好的模型在 huggingface 的 `shengyuf/CAM_data` 和 `shengyuf/CAM_models`。
 - AnGNN 和我们现在的 DIFUSCO 门控 GCN 是同一类网络，但有一处关键差别（11-06 更正，之前写成"基本一样"）：AnGNN 在 MIS 上把每层的零初始化放在节点分支（`ref/CAM/models/angnn.py:230-235, 338-339`），所以初始化时它等于一个看不到图结构的逐节点 MLP；我们的网络把零初始化放在边分支。CAM 在 MIS 上用的是 `EncodeProcessDecode`（ER 上是 8 层 × 64 维，不接收时间，关掉混合精度）。
-- 决定：三臂统一用 `EncodeProcessDecode` 系列。
-  - CAM 臂用原版（不带时间），配置照抄 CAM 脚本，先复现论文数字。
-  - AS 和 ASBS 臂用 `EncodeProcessDecodeTime2`（标量输入，每层加时间嵌入），需要：
-    - 输出层零初始化；
-    - GraphNorm 按图、按样本分别归一化（torch_geometric `graph_norm.py:65-76`），CAM 的 (N, K) 布局本身就不会把不同样本混在一起。要处理的是我们按 n_max 补齐的布局里的填充节点，它们不能进入统计量；
-    - ASBS 的 corrector h 也用 `Time2`，t 固定为 1。
-    - 编码器问题（11-06 发现）：EPD 的节点编码器偏置初始化为 0，每层是 LN(ReLU(w·s))，对正的输入尺度不变，所以初始化时网络只看得到 sign(x)（`enprocessde.py:47, 55`）。离散输入只取 {0,1}，不受影响；连续两臂可能需要改编码器（非零偏置或正弦标量嵌入），用小规模试跑选，并在论文里写明。
-    - 精度：CAM 的 ER 脚本关掉混合精度（`mis_er_cam.sh:3`），三臂统一用 fp32。
-- **接入方式（用户决定，11-06）：方案 A，三臂都在 CAM 的代码里跑。**
-  - 把连续的 AS/ASBS（含 B1+ 参考过程）写成 CAM 代码里的新 solver，和 `solvers/cam.py` 并列。
-  - CAM、RLSA 等基线直接用官方实现；数据读取、网络和评测都和 CAM 论文一致。
-  - 需要从 `sbmis/` 移植：参考过程的闭式公式（转移、桥、lean adjoint、CM 目标）、逐图特征分解与缓存、replay buffer、AM/CM 交替、解析 corrector。已有的单元测试也一并移植，作为正确性检查。
-  - 注意：公开的 CAM 仓库没有 LICENSE 文件。把它的代码复制进我们的仓库之前，要先和学长确认可以这样用，尤其是我们的仓库公开的话。
+- **网络（用户决定，11-06 晚，取代下午"三臂统一用 EncodeProcessDecode"的决定）**
+  - CAM 臂（CAM、CAM + 先验、RLSA）：用 CAM 的原版 `EncodeProcessDecode`（ER 上 8 层 × 64 维，不接收时间，fp32），配置照抄 CAM 脚本。CAM + 先验这一组把输出头零初始化，残差从 0 开始，初始就是 RLSA。
+  - AS 和 ASBS 两臂：**继续用之前的网络**（`sbmis/models/difusco_gnn.py`，DIFUSCO 门控 GCN，8 层 × 128 维，带时间输入），改动最小，先不迁移到 `EncodeProcessDecode`。
+  - 后果：两类臂的网络不同。每一臂内部"基线 vs + 能量"用的是同一个网络，结论不受影响；跨臂只比绝对的 MIS 指标，论文里要写明网络不同。学长说过 AnGNN 这类门控 GCN 在 MIS 上"一般"，所以连续两臂的绝对水平可能偏低。
+  - 下午记录的 `Time2`、GraphNorm 和编码器只看得到 sign(x) 这几个问题，只在连续臂换成 `EncodeProcessDecode` 时才相关，现在暂时搁置。
+- **接入方式（用户决定，11-06 晚，取代下午的"方案 A"）：混合方案。**
+  - CAM 臂放在 CAM 公开代码的副本里做，新加一个"CAM + RLSA 先验"的 solver，和 `solvers/cam.py` 并列。CAM、RLSA 等基线直接用官方实现，训练器、解码和计时和论文一致。
+  - AS 和 ASBS 两臂留在 `sbmis/`。参考过程的闭式公式、特征分解缓存、AM/CM 交替这些已有测试的部分都不动。
+  - 理由：把连续部分移植进 CAM 的训练框架，风险比反过来大得多。
+  - 两边用同一份数据（`/data/shengyuf/MIS`，只读）和同一种解码（CAM 的按分数贪心解码，移植进 sbmis 时要逐样本对齐）。跨臂只比 MIS 指标。
+  - CAM 的代码用本机现成的 conda 环境 `~/anaconda3/envs/CAM` 只读运行（用户 11-06 同意）。pycache、wandb、HF 和其他缓存都指到 yunyi 下，不往这个环境里装任何东西。
+  - CAM 公开仓库没有 LICENSE 文件。用户认为仓库公开可访问、作者是学长，可以使用；复制进来时保留来源说明和上游 commit 号。
+  - 本机 `/data/shengyuf/RiemannCO/` 下有大量 MIS 训练结果（例如 `mis_er_rlnn_train/best.pt`），CAM 很可能就是在这台机器上跑的。
 
 **温度**
 - AS 和 ASBS 臂（用户决定）：对齐 AS 和 ASBS 论文本身的设定，并适当考虑 MIS：**固定温度、不退火，取值比 0.5 低**。具体值按 §0.7 的 CPU 标定选。
