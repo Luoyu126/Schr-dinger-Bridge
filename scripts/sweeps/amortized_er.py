@@ -13,6 +13,9 @@ Groups (picked from the single-instance study, runs/main_ref):
   B0+prior4   f = 0, energy-prior source, gamma_rel = 4
   iso4m2      isotropic OU matched on E|X_1|^2 / n to B1+ at rho = 4
   B1p_rho2/4  ours: B1+ (M - lambda_min I) at rho = 2 / 4
+  AS_B1p_rho2/4  Adjoint Sampling with the B1+ reference instead of f = 0: Dirac source, so
+                 any reference is memoryless and the corrector grad log p_1^base is analytic
+                 (no CM); differs from AS only in the reference process
 rot is left out: a per-graph Haar rotation makes u, h non-functions of the graph.
 
 Validation during training: the 32 val graphs, 16 samples each, N = 25, every 2 stages.
@@ -35,7 +38,10 @@ GROUPS = {
     "iso4m2": "--base iso_ou --iso_match_rho 4 --iso_match m2",
     "B1p_rho2": "--base linear_energy_shift --rho 2",
     "B1p_rho4": "--base linear_energy_shift --rho 4",
+    "AS_B1p_rho2": "--base linear_energy_shift --rho 2 --source delta --analytic_corrector",
+    "AS_B1p_rho4": "--base linear_energy_shift --rho 4 --source delta --analytic_corrector",
 }
+DEFAULT_GROUPS = ["B0", "AS", "VP", "B0+prior4", "iso4m2", "B1p_rho2", "B1p_rho4"]
 
 
 def main():
@@ -44,7 +50,8 @@ def main():
     ap.add_argument("--stages", type=int, default=16)
     ap.add_argument("--ckpt_every", type=int, default=4, help="stages between checkpoints")
     ap.add_argument("--seeds", type=int, nargs="+", default=[0])
-    ap.add_argument("--groups", nargs="+", default=list(GROUPS))
+    ap.add_argument("--groups", nargs="+", default=DEFAULT_GROUPS, choices=list(GROUPS))
+    ap.add_argument("--tsv", default=None, help="job-table file name (default jobs_s<seeds>.tsv)")
     a = ap.parse_args()
     root = Path("runs/amortized") / a.dataset
     root.mkdir(parents=True, exist_ok=True)
@@ -58,7 +65,9 @@ def main():
             out = root / f"{g}_s{seed}"
             lines.append(f"{a.dataset}__{g}__s{seed}\t{PY} scripts/train_amortized.py {common} "
                          f"{GROUPS[g]} --seed {seed} --out {out}")
-    f = root / f"jobs_s{'_'.join(map(str, a.seeds))}.tsv"
+    f = root / (a.tsv or f"jobs_s{'_'.join(map(str, a.seeds))}.tsv")
+    if f.exists():
+        raise SystemExit(f"{f} exists; pass a new --tsv name")
     f.write_text("\n".join(lines) + "\n")
     print(f"{len(lines)} jobs -> {f}")
 
