@@ -55,6 +55,10 @@ def parse():
     ap.add_argument("--kappa_w", type=float, default=2.0)
     ap.add_argument("--temp", type=float, default=0.5)
     ap.add_argument("--alpha_max", type=float, default=100.0)
+    ap.add_argument("--clip_mode", choices=["vector", "node"], default="vector",
+                    help="terminal grad E/T clipping: whole-sample norm or per node")
+    ap.add_argument("--pmap", choices=["lin", "clamp", "smooth"], default="lin",
+                    help="p(x) inside E_quad (bounded maps fix low-T infeasible minima)")
     # network (DIFUSCO gated GCN, shared by u and h)
     ap.add_argument("--hidden", type=int, default=128)
     ap.add_argument("--layers", type=int, default=8)
@@ -110,7 +114,7 @@ def main():
                        rho=a.rho, sigma=a.sigma, rot_seed=a.seed if a.rot_seed is None else a.rot_seed,
                        iso_match_rho=a.iso_match_rho, iso_match=a.iso_match,
                        sigma_min=a.sigma_min, vp_beta0=a.vp_beta0, vp_beta1=a.vp_beta1,
-                       source=a.source, prior_gamma=a.prior_gamma)
+                       source=a.source, prior_gamma=a.prior_gamma, pmap=a.pmap)
     n_max = int(max(train.n.max(), val.n.max()))
     pool = GraphPool(train, spec, device=dev, cache_size=a.cache_size, n_max=n_max)
     vpool = GraphPool(val, spec, device=dev, cache_size=len(val) + 1, n_max=n_max)
@@ -126,7 +130,7 @@ def main():
         n_train_steps=a.n_train_steps, train_batch=a.train_batch, itr_per_epoch=a.itr_per_epoch,
         buffer_size=a.buffer_size, am_epochs=a.am_epochs, cm_epochs=a.cm_epochs,
         init_stage="corrector" if a.init == "cm_first" else "adjoint", lr=a.lr,
-        grad_clip=a.grad_clip, alpha_max=a.alpha_max, max_stages=a.stages,
+        grad_clip=a.grad_clip, alpha_max=a.alpha_max, clip_mode=a.clip_mode, max_stages=a.stages,
         max_grad_calls=a.max_grad_calls, eval_every_stages=a.eval_every,
         fixed_corrector=a.analytic_corrector, amp=not a.no_amp, save_at=tuple(a.save_at),
         seed=a.seed, sim_chunk=a.sim_chunk)
