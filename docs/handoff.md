@@ -110,6 +110,12 @@
 
 ## 4. 实验状态
 
+> **11-06 晚，连续两臂按新协议开跑**（`docs/plan.md` §0.8）：
+> - 6 组，种子 0：AS、AS_B1p_rho2、B0、B1p_rho2、iso2m2、B0+prior8；smooth 映射，κ_w=1，T=0.075。
+> - 任务表 `runs/amortized/er_200_300_v2/jobs_s0.tsv`，启动器日志 `runs/queue_amort_v2.launcher.log`，logdir `runs/queue_amort_v2`，`--min_free_mb 8000`。
+> - fp32 下每个任务约占 6.6–7.7 GB 显存，所以每张卡只放一个。
+> - CAM 臂的搭建由后台任务进行（代码在 `cam/`，数据在 `data/cam/`，尚未提交）。
+
 > **11-06 14:43 按用户要求停止全部实验，先重新讨论方案再跑。** 现在没有任何我们的进程在跑，GPU 0、2–7 全部空闲。停止时：
 > - 摊销第一批（T=0.5，ER-[200-300]，种子 0）：
 >   - AS 完成 6 个 stage，有 `ckpt_30720.pt`，最新验证 gap_best 0.159；
