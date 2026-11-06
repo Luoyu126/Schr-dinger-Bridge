@@ -110,6 +110,12 @@
 
 ## 4. 实验状态
 
+> **11-06 晚，CAM 臂第一批开跑**（ER-[200-300]，种子 0，每组 50 个 epoch，温度退火覆盖整个训练，每个 epoch 存 checkpoint）：
+> - 组别：CAM τ0=0.1、CAM τ0=0.05、CAMPrior 先验 τ0 ∈ {0.01, 0.1, 1.0}。
+> - 任务表 `runs/cam/mis_er200/jobs_s0.tsv`（由 `scripts/sweeps/cam_er200.py` 生成），启动器日志 `runs/queue_cam_er200.launcher.log`，输出在 `runs/cam/mis_er200/<exp>/`。
+> - 单卡每个 epoch 约 15 分钟，每组约 12.5 小时；GPU 0、4、5、6、7 各一个。
+> - 连续两臂的 v2 批次（smooth，T=0.075）在第 1–5 个 stage 发散并塌缩，11-06 已停止；原因研究在进行（`runs/scratch/collapse/`）。
+
 > **11-06 晚，连续两臂按新协议开跑**（`docs/plan.md` §0.8）：
 > - 6 组，种子 0：AS、AS_B1p_rho2、B0、B1p_rho2、iso2m2、B0+prior8；smooth 映射，κ_w=1，T=0.075。
 > - 任务表 `runs/amortized/er_200_300_v2/jobs_s0.tsv`，启动器日志 `runs/queue_amort_v2.launcher.log`，logdir `runs/queue_amort_v2`，`--min_free_mb 8000`。
