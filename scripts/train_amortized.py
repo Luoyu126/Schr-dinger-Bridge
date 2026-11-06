@@ -59,6 +59,8 @@ def parse():
     ap.add_argument("--hidden", type=int, default=128)
     ap.add_argument("--layers", type=int, default=8)
     ap.add_argument("--no_amp", action="store_true")
+    ap.add_argument("--no_checkpoint", action="store_true",
+                    help="disable per-layer activation checkpointing (on by default, as DIFUSCO on ER)")
     # schedule
     ap.add_argument("--graphs_per_epoch", type=int, default=32)
     ap.add_argument("--samples_per_graph", type=int, default=8)
@@ -112,12 +114,13 @@ def main():
     n_max = int(max(train.n.max(), val.n.max()))
     pool = GraphPool(train, spec, device=dev, cache_size=a.cache_size, n_max=n_max)
     vpool = GraphPool(val, spec, device=dev, cache_size=len(val) + 1, n_max=n_max)
-    u = DifuscoGNN(hidden=a.hidden, n_layers=a.layers)
+    ck = not a.no_checkpoint
+    u = DifuscoGNN(hidden=a.hidden, n_layers=a.layers, activation_checkpoint=ck)
     if a.analytic_corrector:
         assert a.source == "delta"
         h = AnalyticCorrectorAmortized(pool)
     else:
-        h = DifuscoGNN(hidden=a.hidden, n_layers=a.layers)
+        h = DifuscoGNN(hidden=a.hidden, n_layers=a.layers, activation_checkpoint=ck)
     cfg = AmortizedConfig(
         graphs_per_epoch=a.graphs_per_epoch, samples_per_graph=a.samples_per_graph,
         n_train_steps=a.n_train_steps, train_batch=a.train_batch, itr_per_epoch=a.itr_per_epoch,
