@@ -104,7 +104,12 @@ class MetaSolver(object):
         all_time = []   
         all_eval_set_size = []
         
+        all_idx = []  # local patch (see UPSTREAM.md): dataset index of each evaluated graph
+
         for _, batch in tqdm(enumerate(dataloader), total=len(dataloader), disable=not self.accelerator.is_local_main_process):
+            batch_idx = getattr(batch, 'idx', None)
+            all_idx.append(torch.as_tensor(batch_idx, device=self.accelerator.device).reshape(-1)[0].long()
+                           if batch_idx is not None else torch.tensor(-1, device=self.accelerator.device))
             st_time = time.time()
             eval_set_size = self.evaluate_single(batch)
             end_time = time.time()
@@ -112,6 +117,7 @@ class MetaSolver(object):
             all_eval_set_size.append(eval_set_size)
 
         self.accelerator.wait_for_everyone()
+        all_idx = self.accelerator.gather(torch.stack(all_idx))
 
         all_time = torch.stack(all_time)
 
@@ -129,6 +135,14 @@ class MetaSolver(object):
                 with open(log_path, 'w') as f:
                     f.write('Avg. obj: %f\n'%obj_result)
                     f.write('Avg. time: %f\n'%time_result)
+                # Local patch (see UPSTREAM.md): per-graph objective and time, so that gaps to
+                # per-graph reference sizes can be computed offline. Only written at test time.
+                files = getattr(getattr(dataloader, 'dataset', None), 'files', None) or []
+                with open(log_path + '.per_graph.csv', 'w') as f:
+                    f.write('idx,file,obj,time\n')
+                    for i, o, t in zip(all_idx.tolist(), all_eval_set_size.float().tolist(), all_time.tolist()):
+                        name = os.path.basename(files[i]) if 0 <= i < len(files) else ''
+                        f.write(f'{i},{name},{o},{t}\n')
         return obj_result, time_result
 
 # Neural Solver

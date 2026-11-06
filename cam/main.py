@@ -95,10 +95,13 @@ def main():
         ckpts = list(Path(args.save_dir).glob('*.pt'))
         if ckpts:
             print(f"Warning: checkpoint(s) found in {args.save_dir}: {[c.name for c in ckpts]}")
-            confirm = input("Training will overwrite existing checkpoints. For testing, please remove the --do_train flag. Continue? [y/N] ").strip().lower()
-            if confirm != 'y':
-                print("Aborted.")
-                return
+            # Local patch (see UPSTREAM.md): fail fast instead of an interactive input() prompt,
+            # so unattended runs never hang; set CAM_ALLOW_OVERWRITE=1 to overwrite on purpose.
+            if os.environ.get("CAM_ALLOW_OVERWRITE") != "1":
+                raise SystemExit(f"Refusing to overwrite checkpoint(s) in {args.save_dir}. "
+                                 "Use a new --save_dir, remove --do_train for testing, "
+                                 "or set CAM_ALLOW_OVERWRITE=1.")
+            print("CAM_ALLOW_OVERWRITE=1: existing checkpoints will be overwritten.")
     if not args.do_train:
         args.wandb_run_name = 'test_' + args.wandb_run_name 
     # fix seeds
