@@ -4,11 +4,15 @@ S1  U1 g2  network: {gnn, mlp} x rho {0, 4} x 3 seeds
 S2  U1 g2  lr {1e-4, 3e-4, 1e-3} x rho {0, 1, 4} x 3 seeds (GNN)
 S3  U1 g2  rho = 4 stabilisation: am_precond (EXPERIMENTAL) and grad-norm clip, 3 seeds
 S4  n=100  lr {1e-4, 3e-4, 5e-4, 1e-3} x rho {0, 2} x 3 seeds, plus lr 1e-3 + grad clip
+S5  B0-S (geometric VE, f = 0), 3 seeds. (sigma_min, sigma_max): (0.001, 1) is the official
+    ASBS DW-4 / LJ13 setting and also matches B0's total variance sigma^2 = 1; (0.001, 2) is
+    the LJ55 setting; (0.01, 1) the earlier default. U1 g2 at lr 1e-4 (+ lr 3e-4 for
+    (0.001, 1)); n=100 at lr 3e-4, also evaluated with 200 inference steps.
 
 Common: AM:CM = 30:30 epochs, 512 fresh samples / epoch, alpha_max = 100,
 CM first, sigma = 1. Writes runs/<screen>/jobs.tsv for scripts/launch.py.
 
-python scripts/sweeps/quick_screen.py --kappa 2 --temp 0.5
+python scripts/sweeps/quick_screen.py --kappa 2 --temp 0.5 [--only runs/s5_ve]
 """
 import argparse
 from pathlib import Path
@@ -28,6 +32,7 @@ def main():
     ap.add_argument("--u1_graph", default="g2")
     ap.add_argument("--u1_stages", type=int, default=20)
     ap.add_argument("--n100_stages", type=int, default=10)
+    ap.add_argument("--only", nargs="+", default=None, help="write only these screen roots")
     a = ap.parse_args()
     ref = f"runs/u1_ref/{a.u1_graph}_k{a.kappa:g}_T{a.temp:g}.pt"
     u1 = dict(graph=a.u1_graph, kappa_w=a.kappa, temp=a.temp, ref=ref, stages=a.u1_stages,
@@ -57,7 +62,22 @@ def main():
          for lr in [1e-4, 3e-4, 5e-4, 1e-3] for rho in [0, 2] for s in [0, 1, 2]]
         + [job(r, f"gclip1_lr1e-3_rho{rho}_s{s}", net="gnn", lr=1e-3, grad_clip=1.0, seed=s,
                **n100, **base_kw(rho)) for rho in [0, 2] for s in [0, 1, 2]])
+    r = "runs/s5_ve"
+
+    def ve(smin, smax):
+        return dict(base="ve_geometric", sigma_min=smin, sigma=smax)
+
+    screens[r] = (
+        [job(r, f"u1_smin{smin:g}_smax{smax:g}_lr{lr:g}_s{s}", net="gnn", lr=lr, seed=s, **u1,
+             **ve(smin, smax))
+         for smin, smax, lr in [(0.001, 1, 1e-4), (0.001, 2, 1e-4), (0.01, 1, 1e-4),
+                                (0.001, 1, 3e-4)] for s in [0, 1, 2]]
+        + [job(r, f"n100_smin{smin:g}_smax{smax:g}_lr3e-4_s{s}", net="gnn", lr=3e-4, seed=s,
+               **{**n100, "n_infer_steps": "20 100 200"}, **ve(smin, smax))
+           for smin, smax in [(0.001, 1), (0.001, 2)] for s in [0, 1, 2]])
     for root, jobs in screens.items():
+        if a.only and root not in a.only:
+            continue
         Path(root).mkdir(parents=True, exist_ok=True)
         (Path(root) / "jobs.tsv").write_text("\n".join(jobs) + "\n")
         print(root, len(jobs))
