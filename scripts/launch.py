@@ -26,6 +26,10 @@ from pathlib import Path
 OUR_ENV = "/usr0/home/shengyuf/yunyi/envs/sb/"
 
 
+# children must not write to /tmp (AGENTS.md): torch creates temp dirs on import
+TMP = Path("/usr0/home/shengyuf/yunyi/.cache/tmp")
+TMP.mkdir(parents=True, exist_ok=True)
+
 def gpu_state():
     q = subprocess.run(["nvidia-smi", "--query-gpu=index,uuid,memory.total,memory.used",
                         "--format=csv,noheader,nounits"], capture_output=True, text=True).stdout
@@ -117,7 +121,7 @@ def main():
                     continue
                 name, cmd = jobs.pop(0)
                 env = dict(os.environ, CUDA_VISIBLE_DEVICES=str(g), PYTHONUNBUFFERED="1",
-                           OMP_NUM_THREADS="2", MKL_NUM_THREADS="2")
+                           OMP_NUM_THREADS="2", MKL_NUM_THREADS="2", TMPDIR=str(TMP))
                 (logdir / f"{name}.failed").unlink(missing_ok=True)
                 log = open(logdir / f"{name}.log", "w")
                 p = subprocess.Popen(cmd, shell=True, stdout=log, stderr=subprocess.STDOUT, env=env)
