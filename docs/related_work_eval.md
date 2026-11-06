@@ -24,6 +24,10 @@
   - Table 1 特意强调目标函数"不依赖重要性权重"（L189）。
   - 附录 D.4（L3023–3063）写出了权重 dp*/dp^u，但对非 memoryless 的情形，说所需的比值 "not immediately available"，留作以后的工作。
 - **参考过程**：所有任务都取 f=0。能量信息放在源分布上：DW、LJ 和构象用谐振子先验（L726–735），原文说它比高斯源 "slightly better"。
+- **温度**：写在目标分布 $\nu\propto e^{-E/\tau}$ 里，按任务固定，训练中不退火。
+  - DW 和 LJ 取 τ=1（L2733、L2743），丙氨酸二肽取 300K（L599）。
+  - **摊销构象生成刻意取低温 τ≪1**（L604–612），因为目的是找能量极小点。评估看是否覆盖 CREST 的低能构象（COV-R、AMR-R），不看精确的分布距离。
+  - ASBS 说沿用 Adjoint Sampling 的设定。Adjoint Sampling 代码中 τ=5e-3（`adjoint_sampling/configs/experiment/spice_cartesian.yaml:42`），力除以 τ（`adjoint_sampling/adjoint_sampling/energies/fairchem_energy.py:116`）。官方 ASBS 代码里没有这个任务的配置。
 - **memoryless 的定义**：参考过程下 X0 与 X1 独立（L308–311）。按这个定义，我们的 B0（高斯源 + f=0）**也不是** memoryless，只有 AS（Dirac 源）是。
 
 ## 2. Adjoint Sampling（Havens 等，arXiv 2504.11713）
@@ -80,6 +84,8 @@
   - W2 和 MMD 的结论大体一致。
 
 ## 5. 对我们评估的含义（建议，不是文献结论）
+
+> **11-06 下午，用户决定主指标用 MIS 的优化指标**，并把我们的设定类比为 ASBS 的摊销构象生成（低温目标，看能否找到低能解），见 `docs/plan.md` §0.7。下面以分布距离为主的方案作废，只在需要论证"没有塌缩"时作为备用。
 
 - **主指标按 ASBS 的惯例，看与参考样本的分布距离。**
   - 小图：符号模式上的 TV（已实现，带噪声下限），再补一个能量 W2。注意 TV 看不到同一个符号象限内部的形状误差。
