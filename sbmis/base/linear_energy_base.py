@@ -141,8 +141,11 @@ class LinearEnergyBase:
             var = (self.sigma**2) * (t * tau).expand_as(x0)
             return mean, var
         # work in float64 for the hyperbolic ratios, then cast back
+        # (tau is recomputed in float64: casting a float32 1 - t would break t + tau = 1,
+        #  which the cancellation in G amplifies by ~1/theta)
         th64 = th.double().expand(t.shape[0], -1)
-        t64, tau64 = t.double(), tau.double()
+        t64 = t.double()
+        tau64 = 1.0 - t64
         small = th64.abs() < SMALL
         ts = _safe(th64)
         S1 = torch.sinh(ts)

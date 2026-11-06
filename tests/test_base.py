@@ -184,3 +184,18 @@ def test_t7_integrator_step_size_invariance(rho):
     assert ((xa.mean(0) - xb.mean(0)).abs() / sd).max().item() < 0.02
     ca, cb = torch.cov(xa.T), torch.cov(xb.T)
     assert (torch.linalg.norm(ca - cb) / torch.linalg.norm(cb)).item() < 0.02
+
+
+# ---------------------------------------------------------------- regression
+def test_bridge_float32_t_plus_tau_consistency():
+    """float32 t must not break t + tau = 1 inside the float64 G computation."""
+    th = 1.0001e-4  # just above the Taylor threshold, where G's cancellation is worst
+    base32 = LinearEnergyBase(np.array([[th]]), np.array([0.7]), sigma=1.0, lam=1.0,
+                              dtype=torch.float32)
+    t = torch.tensor([[1e-6], [0.3], [1 - 2**-20]], dtype=torch.float32)
+    x0 = torch.full((3, 1), -0.4)
+    x1 = torch.full((3, 1), 1.1)
+    m32, _ = base32.bridge_mean_var(t, x0, x1)
+    base64 = LinearEnergyBase(np.array([[th]]), np.array([0.7]), sigma=1.0, lam=1.0, dtype=F64)
+    m64, _ = base64.bridge_mean_var(t.double(), x0.double(), x1.double())
+    assert (m32.double() - m64).abs().max().item() < 1e-6
