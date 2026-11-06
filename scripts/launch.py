@@ -13,6 +13,7 @@ placement. The per-GPU cap counts all of our processes on the GPU, so several
 launchers can share the machine. Never kills or signals any process.
 
 python scripts/launch.py jobs.tsv --logdir runs/sweep --gpus 0 2 3 4 5 6 7 --per_gpu 4
+--max_mine 1 spreads long jobs one per GPU (they wait instead of doubling up).
 """
 import argparse
 import fcntl
@@ -66,6 +67,8 @@ def main():
     ap.add_argument("--gpus", nargs="+", type=int, default=[0, 2, 3, 4, 5, 6, 7])
     ap.add_argument("--per_gpu", type=int, default=4)
     ap.add_argument("--min_free_mb", type=int, default=2500)
+    ap.add_argument("--max_mine", type=int, default=None,
+                    help="at most this many of this launcher's jobs per GPU (default: no limit)")
     ap.add_argument("--poll", type=float, default=20.0)
     a = ap.parse_args()
     logdir = Path(a.logdir)
@@ -109,6 +112,8 @@ def main():
                 if s is None or s["foreign"] or s["free"] < a.min_free_mb:
                     continue
                 if max(s["ours"], mine[g]) >= a.per_gpu:
+                    continue
+                if a.max_mine is not None and mine[g] >= a.max_mine:
                     continue
                 name, cmd = jobs.pop(0)
                 env = dict(os.environ, CUDA_VISIBLE_DEVICES=str(g), PYTHONUNBUFFERED="1",
