@@ -345,6 +345,9 @@ class AmortizedConfig:
     temp_start: float | None = None
     bin_gamma_start: float = 0.0
     anneal_epochs: int = 0
+    # "linear" as above, or "geometric": T_e = temp_start (T / temp_start)^f (equal epochs per
+    # factor of T; for a temp_start orders of magnitude above T)
+    temp_schedule: str = "linear"
 
 
 class GraphBuffer:
@@ -400,6 +403,10 @@ class AmortizedTrainer:
         self._annealing = cfg.temp_start is not None or cfg.bin_gamma_start != 0.0
         if self._annealing and cfg.anneal_epochs <= 0:
             raise ValueError("temp_start / bin_gamma_start need anneal_epochs > 0")
+        if cfg.temp_schedule not in ("linear", "geometric"):
+            raise ValueError(cfg.temp_schedule)
+        if cfg.temp_schedule == "geometric" and cfg.temp_start is not None and cfg.temp_start <= 0:
+            raise ValueError("geometric temperature schedule needs temp_start > 0")
         self._saved: set = set()
         self._clip_hits = self._clip_total = 0
         self._clip_node_hits = self._clip_node_total = 0
@@ -416,7 +423,8 @@ class AmortizedTrainer:
             return T, 0.0  # exactly the true target
         f = e / cfg.anneal_epochs
         t0 = T if cfg.temp_start is None else cfg.temp_start
-        return t0 + f * (T - t0), cfg.bin_gamma_start * (1.0 - f)
+        Te = t0 * (T / t0) ** f if cfg.temp_schedule == "geometric" else t0 + f * (T - t0)
+        return Te, cfg.bin_gamma_start * (1.0 - f)
 
     def _clip(self, g, b, count=False):
         """alpha_max clipping of grad E / T (see AmortizedConfig.clip_mode)."""
