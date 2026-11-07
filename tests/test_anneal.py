@@ -90,9 +90,19 @@ def test_schedule_is_linear_then_constant():
         assert abs(T - Tw) < 1e-12 and abs(g - gw) < 1e-12
 
 
+def test_geometric_schedule():
+    tr = _trainer(temp_start=10.0, anneal_epochs=4, temp_schedule="geometric")
+    got = [tr.schedule(e)[0] for e in (0, 1, 2, 3, 4, 7)]
+    want = [10.0, 10.0 * 0.01 ** 0.25, 1.0, 10.0 * 0.01 ** 0.75, 0.1, 0.1]
+    assert all(abs(g - w) < 1e-12 for g, w in zip(got, want))
+    assert tr.schedule(4) == (0.1, 0.0)
+
+
 def test_annealing_needs_epochs():
     with pytest.raises(ValueError):
         _trainer(temp_start=1.0)
+    with pytest.raises(ValueError):
+        _trainer(temp_start=1.0, anneal_epochs=2, temp_schedule="cosine")
 
 
 def test_buffer_target_follows_current_schedule():
