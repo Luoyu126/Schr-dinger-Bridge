@@ -20,6 +20,8 @@ The trainer mirrors sbmis.asbs.ASBSTrainer (AM/CM alternation, replay buffers, I
 alpha_max clipping scaled by sqrt(n_g / 100) per sample (or per node, clip_mode="node"), Adam shared by u and h, evaluations on
 a forked RNG). Each epoch draws `graphs_per_epoch` training graphs and `samples_per_graph`
 trajectories on each. Budget unit: one energy-gradient call = one terminal sample.
+Optional training-time annealing of the AM target (temperature and/or a binarization term,
+off by default): AmortizedConfig.temp_start / bin_gamma_start / anneal_epochs.
 """
 from __future__ import annotations
 
@@ -169,7 +171,8 @@ class GraphPool:
         well = sp.kappa_w * (well_mask(x, sp.well) * ((x * x - 1.0) ** 2) * m).sum(-1)
         return quad + well
 
-    def grad_u(self, x, b):
+    def grad_e(self, x, b):
+        """grad E_tgt (not divided by T), masked."""
         sp, m = self.spec, b.mask.to(x.dtype)
         well = 4.0 * sp.kappa_w * well_mask(x, sp.well) * x * (x * x - 1.0)
         if sp.pmap == "lin":
@@ -178,7 +181,19 @@ class GraphPool:
         else:
             p, dp = p_and_dp(x, sp.pmap)
             g = dp * (-1.0 + sp.lambda_p * self._Ax(p * m, b)) + well
-        return g * m / sp.temp
+        return g * m
+
+    def grad_u(self, x, b):
+        return self.grad_e(x, b) / self.spec.temp
+
+    def grad_bin(self, x, b):
+        """grad of the binarization term Phi(x) = sum_i (1 - (2 p_i - 1)^2), masked.
+
+        gamma * Phi with gamma < 0 favours p = 1/2 (CRA, arXiv 2309.16965 eq. 5 with
+        alpha = 2; PQQA, arXiv 2409.02135): it removes the all-off stationary point. It
+        enters only the training target (AmortizedConfig.bin_gamma_start), never E_tgt."""
+        p, dp = p_and_dp(x, self.spec.pmap)
+        return -4.0 * (2.0 * p - 1.0) * dp * b.mask.to(x.dtype)
 
     # ---- per-graph reference-process parameters -----------------------------
     def _graph_params(self, gi: int) -> dict:
@@ -320,6 +335,16 @@ class AmortizedConfig:
     kl_graphs: int = 16
     seed: int = 0
     sim_chunk: int = 64             # samples per network call during simulation (memory)
+    # Training-time annealing of the AM terminal target (both off by default). With
+    # f = min(e / anneal_epochs, 1), e = AM epochs completed, the target of AM epoch e is
+    #   clip((grad E + gamma_e grad Phi) / T_e) + h(x1),
+    #   T_e = temp_start + f (T - temp_start),   gamma_e = bin_gamma_start (1 - f),
+    # so after anneal_epochs it is the true target. Phi: GraphPool.grad_bin. The buffer keeps
+    # grad E, grad Phi and h(x1) separately and rebuilds the target with the current T_e,
+    # gamma_e at every minibatch (no extra energy calls, no stale temperatures).
+    temp_start: float | None = None
+    bin_gamma_start: float = 0.0
+    anneal_epochs: int = 0
 
 
 class GraphBuffer:
@@ -371,10 +396,53 @@ class AmortizedTrainer:
         self.out_dir = Path(out_dir) if out_dir else None
         self.eval_fn, self.log = eval_fn, log
         self.grad_calls, self.t_start, self._epoch = 0, time.time(), 0
+        self._am_epochs_done = 0
+        self._annealing = cfg.temp_start is not None or cfg.bin_gamma_start != 0.0
+        if self._annealing and cfg.anneal_epochs <= 0:
+            raise ValueError("temp_start / bin_gamma_start need anneal_epochs > 0")
         self._saved: set = set()
         self._clip_hits = self._clip_total = 0
         self._clip_node_hits = self._clip_node_total = 0
         self._ke_sum, self._ke_n = 0.0, 0
+
+    # ---- training-time annealing ----------------------------------------------------
+    def schedule(self, epochs_done=None):
+        """(T_e, gamma_e) used by the AM target after `epochs_done` AM epochs."""
+        cfg, T = self.cfg, self.pool.spec.temp
+        if not self._annealing:
+            return T, 0.0
+        e = self._am_epochs_done if epochs_done is None else epochs_done
+        if e >= cfg.anneal_epochs:
+            return T, 0.0  # exactly the true target
+        f = e / cfg.anneal_epochs
+        t0 = T if cfg.temp_start is None else cfg.temp_start
+        return t0 + f * (T - t0), cfg.bin_gamma_start * (1.0 - f)
+
+    def _clip(self, g, b, count=False):
+        """alpha_max clipping of grad E / T (see AmortizedConfig.clip_mode)."""
+        cfg = self.cfg
+        alpha = 100.0 if cfg.alpha_max is None else cfg.alpha_max
+        if cfg.clip_mode == "node":
+            if count:
+                over = (g.abs() > alpha) & b.mask
+                self._clip_hits += int(over.any(-1).sum())
+                self._clip_node_hits += int(over.sum())
+                self._clip_node_total += int(b.mask.sum())
+            return g.clamp(-alpha, alpha)
+        assert cfg.clip_mode == "vector", cfg.clip_mode
+        alpha = alpha * torch.sqrt(b.n.float() / 100.0)
+        norm = torch.linalg.vector_norm(g, dim=-1)
+        if count:
+            self._clip_hits += int((norm > alpha).sum())
+        return g * torch.clamp(alpha / (norm + 1e-6), max=1.0)[:, None]
+
+    def _terminal_target(self, d, b):
+        """a1 = clip(grad E_e / T_e) + h(x1) from the buffer entries, at the current schedule."""
+        T, gam = self.schedule()
+        ge = d["ge"]
+        if gam != 0.0:
+            ge = ge + gam * d["gb"]
+        return self._clip(ge / T, b) + d["hx"]
 
     # ---- network evaluation -------------------------------------------------
     def _net(self, net, t, x, b):
@@ -440,25 +508,23 @@ class AmortizedTrainer:
         self._check(x1, "AM samples")
         self._ke_sum += float(ke.sum())
         self._ke_n += b.S
-        g = self.pool.grad_u(x1, b)
+        ge = self.pool.grad_e(x1, b)
         self.grad_calls += b.S
-        alpha = 100.0 if cfg.alpha_max is None else cfg.alpha_max
-        if cfg.clip_mode == "node":
-            over = (g.abs() > alpha) & b.mask
-            self._clip_hits += int(over.any(-1).sum())
-            self._clip_node_hits += int(over.sum())
-            self._clip_node_total += int(b.mask.sum())
-            g = g.clamp(-alpha, alpha)
-        else:
-            assert cfg.clip_mode == "vector", cfg.clip_mode
-            alpha = alpha * torch.sqrt(b.n.float() / 100.0)
-            norm = torch.linalg.vector_norm(g, dim=-1)
-            self._clip_hits += int((norm > alpha).sum())
-            g = g * torch.clamp(alpha / (norm + 1e-6), max=1.0)[:, None]
+        extra = {}
+        T, gam = self.schedule()
+        g = ge
+        if cfg.bin_gamma_start != 0.0:
+            extra["gb"] = self.pool.grad_bin(x1, b)
+            if gam != 0.0:
+                g = g + gam * extra["gb"]
+        self._clip(g / T, b, count=True)  # clip statistics at the sampling-time schedule
         self._clip_total += b.S
         if not init or cfg.fixed_corrector:
-            g = g + self._chunked_net(self.h, torch.ones(b.S, device=self.device), x1, b)
-        self.buf_am.add(gid=torch.as_tensor(b.gids, device=self.device), x0=x0, x1=x1, a1=g)
+            hx = self._chunked_net(self.h, torch.ones(b.S, device=self.device), x1, b)
+        else:
+            hx = torch.zeros_like(x1)
+        self.buf_am.add(gid=torch.as_tensor(b.gids, device=self.device), x0=x0, x1=x1, ge=ge,
+                        hx=hx, **extra)
 
     @torch.no_grad()
     def populate_cm(self, init):
@@ -477,7 +543,7 @@ class AmortizedTrainer:
         if stage == "adjoint":
             t = torch.rand(b.S, 1, device=self.device)
             xt = base.bridge_sample(t, d["x0"], d["x1"]) * m
-            target = -base.lean_adjoint(d["a1"], t) * m
+            target = -base.lean_adjoint(self._terminal_target(d, b), t) * m
             pred = self._net(self.u, t.squeeze(1), xt, b)
         else:
             target = base.cm_target(d["x0"], d["x1"]) * m
@@ -504,12 +570,16 @@ class AmortizedTrainer:
             tot += loss.item()
             mx = max(mx, loss.item())
         self._epoch += 1
+        rec = {"epoch": self._epoch, "stage": stage, "loss": tot / cfg.itr_per_epoch,
+               "loss_max": mx, "grad_calls": self.grad_calls,
+               "wall": time.time() - self.t_start}
+        if self._annealing and stage == "adjoint":
+            rec["temp_train"], rec["bin_gamma"] = self.schedule()
+        if stage == "adjoint":
+            self._am_epochs_done += 1
         if self.out_dir:
             with open(self.out_dir / "epochs.jsonl", "a") as f:
-                f.write(json.dumps({"epoch": self._epoch, "stage": stage,
-                                    "loss": tot / cfg.itr_per_epoch, "loss_max": mx,
-                                    "grad_calls": self.grad_calls,
-                                    "wall": time.time() - self.t_start}) + "\n")
+                f.write(json.dumps(rec) + "\n")
         return tot / cfg.itr_per_epoch
 
     # ---- evaluation ----------------------------------------------------------------
@@ -561,6 +631,8 @@ class AmortizedTrainer:
                                           if self._clip_node_total else None),
                        "ctrl_energy_stage": self._ke_sum / max(self._ke_n, 1),
                        "cache_misses": self.pool.misses}
+                if self._annealing:  # schedule of the stage's last AM epoch
+                    rec["temp_train"], rec["bin_gamma"] = self.schedule(self._am_epochs_done - 1)
                 last = stage_idx == cfg.max_stages or (
                     cfg.max_grad_calls and self.grad_calls >= cfg.max_grad_calls)
                 if self.eval_fn and (stage_idx % cfg.eval_every_stages == 0 or last):
