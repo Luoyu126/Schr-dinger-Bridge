@@ -110,7 +110,14 @@
 
 ## 4. 实验状态
 
-> **11-06 晚，CAM 臂第一批开跑**（ER-[200-300]，种子 0，每组 50 个 epoch，温度退火覆盖整个训练，每个 epoch 存 checkpoint）：
+> **11-06 晚，CAM 臂改到 ER-[700-800]**（CAM 论文主表的数据集；数据只读，取自 `/data/shengyuf/MIS/data_er`）：
+> - ER-[200-300] 太容易：CAM 训练 1 个 epoch 差距就到 2.8%，看不出训练效率，已停。
+> - 5 组：CAM τ0=0.1、0.05，CAMPrior 先验 τ0=0.01、0.1、1.0；种子 0；100 个 epoch，温度退火和学习率余弦衰减都按 100 个 epoch 排；每个 epoch 验证（64 张图）并存 checkpoint。
+> - 超参照抄 CAM 官方 ER 脚本，mini_batch=512 在 2080 Ti 上要开 `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`（峰值约 10.2 GB）。实测单卡每个 epoch 约 33 分钟，100 个 epoch 约 55 小时。
+> - 任务表 `runs/cam/mis_er700/jobs_e100_s0.tsv`（`scripts/sweeps/cam_er700.py`），启动器日志 `runs/queue_cam_er700.launcher.log`，GPU 0、4、5、6、7。
+> - 测速时只训了 40 张图就评测，结果是 CAM 33.3、CAMPrior（τ0=0.1）38.9，16 张验证图，KaMIS 约 44.9。CAMPrior 起步明显领先，主要来自 RLSA 先验本身。
+>
+> 以下是之前的记录：**11-06 晚，CAM 臂第一批开跑**（ER-[200-300]，种子 0，每组 50 个 epoch，温度退火覆盖整个训练，每个 epoch 存 checkpoint）：
 > - 组别：CAM τ0=0.1、CAM τ0=0.05、CAMPrior 先验 τ0 ∈ {0.01, 0.1, 1.0}。
 > - 任务表 `runs/cam/mis_er200/jobs_s0.tsv`（由 `scripts/sweeps/cam_er200.py` 生成），启动器日志 `runs/queue_cam_er200.launcher.log`，输出在 `runs/cam/mis_er200/<exp>/`。
 > - 单卡每个 epoch 约 15 分钟，每组约 12.5 小时；GPU 0、4、5、6、7 各一个。
