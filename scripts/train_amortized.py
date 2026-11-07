@@ -61,6 +61,13 @@ def parse():
                     help="p(x) inside E_quad (bounded maps fix low-T infeasible minima)")
     ap.add_argument("--well", choices=["full", "out"], default="full",
                     help="double well everywhere or only outside [-1, 1] (use with --pmap clamp)")
+    # training-time annealing of the AM target (off by default; see AmortizedConfig)
+    ap.add_argument("--temp_start", type=float, default=None,
+                    help="training temperature at AM epoch 0, linear to --temp over --anneal_epochs")
+    ap.add_argument("--bin_gamma_start", type=float, default=0.0,
+                    help="coefficient of sum_i (1 - (2 p_i - 1)^2) in the training target at AM "
+                         "epoch 0, linear to 0 over --anneal_epochs (< 0 removes the all-off trap)")
+    ap.add_argument("--anneal_epochs", type=int, default=0, help="AM epochs of the annealing")
     # network (DIFUSCO gated GCN, shared by u and h)
     ap.add_argument("--hidden", type=int, default=128)
     ap.add_argument("--layers", type=int, default=8)
@@ -135,7 +142,8 @@ def main():
         grad_clip=a.grad_clip, alpha_max=a.alpha_max, clip_mode=a.clip_mode, max_stages=a.stages,
         max_grad_calls=a.max_grad_calls, eval_every_stages=a.eval_every,
         fixed_corrector=a.analytic_corrector, amp=not a.no_amp, save_at=tuple(a.save_at),
-        seed=a.seed, sim_chunk=a.sim_chunk)
+        seed=a.seed, sim_chunk=a.sim_chunk, temp_start=a.temp_start,
+        bin_gamma_start=a.bin_gamma_start, anneal_epochs=a.anneal_epochs)
     eval_ids = np.arange(len(val) if a.eval_graphs is None else min(a.eval_graphs, len(val)))
 
     def eval_fn(tr):
