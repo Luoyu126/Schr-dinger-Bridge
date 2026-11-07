@@ -68,6 +68,8 @@ def parse():
                     help="coefficient of sum_i (1 - (2 p_i - 1)^2) in the training target at AM "
                          "epoch 0, linear to 0 over --anneal_epochs (< 0 removes the all-off trap)")
     ap.add_argument("--anneal_epochs", type=int, default=0, help="AM epochs of the annealing")
+    ap.add_argument("--temp_schedule", choices=["linear", "geometric"], default="linear",
+                    help="shape of the temperature annealing from --temp_start to --temp")
     # network (DIFUSCO gated GCN, shared by u and h)
     ap.add_argument("--hidden", type=int, default=128)
     ap.add_argument("--layers", type=int, default=8)
@@ -143,7 +145,8 @@ def main():
         max_grad_calls=a.max_grad_calls, eval_every_stages=a.eval_every,
         fixed_corrector=a.analytic_corrector, amp=not a.no_amp, save_at=tuple(a.save_at),
         seed=a.seed, sim_chunk=a.sim_chunk, temp_start=a.temp_start,
-        bin_gamma_start=a.bin_gamma_start, anneal_epochs=a.anneal_epochs)
+        bin_gamma_start=a.bin_gamma_start, anneal_epochs=a.anneal_epochs,
+        temp_schedule=a.temp_schedule)
     eval_ids = np.arange(len(val) if a.eval_graphs is None else min(a.eval_graphs, len(val)))
 
     def eval_fn(tr):
