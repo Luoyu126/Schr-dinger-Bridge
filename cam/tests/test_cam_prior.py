@@ -409,6 +409,15 @@ def test_4_tiny_rollout_backward_and_train_loop():
         obj, _ = tester.evaluate('test', log_path=log)
         assert math.isfinite(obj) and obj < 0
         assert os.path.exists(log + '.per_graph.csv')
+        # (d2) test-time prior settings that differ from the sidecar are an error unless allowed
+        try:
+            build(CAMPrior, data, do_train=False, checkpoint=ckpt, num_t=T, num_k=K, num_tp=T, prior_d=4)
+            raise AssertionError('expected ValueError for a prior_d mismatch')
+        except ValueError as e:
+            assert 'prior_d' in str(e), e
+        t_mm = build(CAMPrior, data, do_train=False, checkpoint=ckpt, num_t=T, num_k=K, num_tp=T, prior_d=4,
+                     prior_allow_mismatch=True)
+        assert t_mm.prior_tau_ratio() == meta['tau_ratio']
         # (e) without a sidecar, test mode refuses unless the scale is given
         bare = os.path.join(tmp, 'bare.pt')
         shutil.copy(ckpt, bare)

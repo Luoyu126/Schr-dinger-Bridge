@@ -57,6 +57,9 @@ shows only the items below).
 15. `solvers/cam_prior.py`: ablation switches `--prior_policy {on,off}` (prior in the flip logits
     or not) and `--prior_kl_ref {rlsa,uniform}` (KL to the prior or CAM's entropy term); both
     off reproduce CAM (tests/test_cam_prior.py, test 5). Defaults keep the original behaviour.
+16. `solvers/cam_prior.py`: at test time, prior settings that differ from the checkpoint's
+    `.prior.json` are an error (previously a warning, so a missing `--prior_d` silently evaluated
+    with the default); `--prior_allow_mismatch` keeps the old behaviour on purpose.
 
 `scripts/config.sh` and the other upstream scripts are unchanged and not used by our runner.
 `CAMPrior` runs through the same runner by appending flags, e.g.

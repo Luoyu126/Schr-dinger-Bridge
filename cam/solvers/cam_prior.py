@@ -107,6 +107,9 @@ def add_cam_prior_args(parser):
                    help='ablation: off = flip logits are the network output alone (prior only in the KL)')
     g.add_argument('--prior_kl_ref', default='rlsa', choices=['rlsa', 'uniform'],
                    help="ablation: uniform = KL to Ber(1/2), i.e. CAM's entropy term (prior only in the policy)")
+    g.add_argument('--prior_allow_mismatch', action='store_true',
+                   help='test time: allow prior settings that differ from the checkpoint sidecar '
+                        '(otherwise an error)')
     g.add_argument('--residual_init', default='zero', choices=['zero', 'default'],
                    help='zero-initialise the output head, so that the untrained sampler is RLSA')
     return parser
@@ -338,8 +341,11 @@ class CAMPrior(CAM):
             diff = {k: (meta.get(k, older.get(k)), v) for k, v in current.items()
                     if meta.get(k, older.get(k)) != v}
             if diff:
-                self.accelerator.print(f'Warning: CAMPrior settings differ from training ({meta_path}), '
-                                       f'(trained, now): {diff}')
+                msg = f'CAMPrior settings differ from training ({meta_path}), (trained, now): {diff}'
+                if not args.prior_allow_mismatch:
+                    raise ValueError(msg + '; pass the training flags again, or --prior_allow_mismatch '
+                                     'to evaluate with different settings on purpose')
+                self.accelerator.print('Warning: ' + msg)
         if args.prior_tau_ratio is not None:
             return float(args.prior_tau_ratio)
         if self.prior_fixed:
