@@ -48,6 +48,9 @@ shows only the items below).
 12. Added `scripts/mis/test_curve_er700.sh` (test-set curve, CPU) and
     `scripts/mis/large_curve_er700.sh` (ER-[9000-11000] generalisation curve: untrained weights
     and every 10th epoch, 200 steps x 20 samples, several evaluations at a time on one GPU).
+    It reads the data from `$CAM_ER700_DIR` and accepts any `<group>_e<E>_s<seed>` run name; the
+    untrained weights come from `mis_er700_init2/` if present, else from the run directory.
+13. `scripts/env.sh`: the cache directory can be moved with `CAM_CACHE` (for other machines).
 
 `scripts/config.sh` and the other upstream scripts are unchanged and not used by our runner.
 `CAMPrior` runs through the same runner by appending flags, e.g.

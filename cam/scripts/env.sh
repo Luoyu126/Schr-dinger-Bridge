@@ -15,7 +15,8 @@ export CAM_ACCELERATE="$CAM_CONDA_BIN/accelerate"
 export CAM_DATADIR="${CAM_DATADIR:-$CAM_REPO/data/cam}"   # gitignored; made by scripts/export_cam_dataset.py
 export CAM_RUNDIR="${CAM_RUNDIR:-$CAM_REPO/runs/cam}"     # gitignored (runs/)
 
-_CAM_CACHE=/usr0/home/shengyuf/yunyi/.cache/cam
+# On another machine set CAM_CACHE (and CAM_CONDA_BIN, CAM_ER700_DIR) to paths inside its work dir.
+_CAM_CACHE="${CAM_CACHE:-/usr0/home/shengyuf/yunyi/.cache/cam}"
 export XDG_CACHE_HOME="$_CAM_CACHE"
 export XDG_CONFIG_HOME="$_CAM_CACHE/config"
 export HF_HOME="$_CAM_CACHE/hf"
