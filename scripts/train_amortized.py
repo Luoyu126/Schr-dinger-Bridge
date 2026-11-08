@@ -70,6 +70,13 @@ def parse():
     ap.add_argument("--anneal_epochs", type=int, default=0, help="AM epochs of the annealing")
     ap.add_argument("--temp_schedule", choices=["linear", "geometric"], default="linear",
                     help="shape of the temperature annealing from --temp_start to --temp")
+    # MCMC refinement of the AM buffer (off by default; Dirac source only, see AmortizedConfig)
+    ap.add_argument("--mcmc_steps", type=int, default=0,
+                    help="MALA steps on exp(-E/T_e) applied to each AM terminal sample")
+    ap.add_argument("--mcmc_min_temp", type=float, default=0.0,
+                    help="refine only while the training temperature T_e >= this")
+    ap.add_argument("--mcmc_step", type=float, default=0.015,
+                    help="initial MALA step h / T_e (adapted toward acceptance 0.57)")
     # network (DIFUSCO gated GCN, shared by u and h)
     ap.add_argument("--hidden", type=int, default=128)
     ap.add_argument("--layers", type=int, default=8)
@@ -146,7 +153,8 @@ def main():
         fixed_corrector=a.analytic_corrector, amp=not a.no_amp, save_at=tuple(a.save_at),
         seed=a.seed, sim_chunk=a.sim_chunk, temp_start=a.temp_start,
         bin_gamma_start=a.bin_gamma_start, anneal_epochs=a.anneal_epochs,
-        temp_schedule=a.temp_schedule)
+        temp_schedule=a.temp_schedule, mcmc_steps=a.mcmc_steps, mcmc_min_temp=a.mcmc_min_temp,
+        mcmc_step=a.mcmc_step)
     eval_ids = np.arange(len(val) if a.eval_graphs is None else min(a.eval_graphs, len(val)))
 
     def eval_fn(tr):
