@@ -1,4 +1,4 @@
-# 交接：CAM 与 CAMPrior 在 ER-[700-800] 上补两个种子（在另一个集群上运行）
+# 交接：CAM 与 CAMPrior 在 ER-[700-800] 上补两个种子，加 4 个消融（在另一个集群上运行）
 
 写于 2026-11-08，分支 `mis-asbs-energy-base`。读者是在另一个集群上接手这项任务的 Claude。
 项目整体进度见 `docs/status.md`。
@@ -25,7 +25,7 @@
 
 单个种子下，CAMPrior 更好、也更稳。**这次的任务**：把这两组各补 seed 1 和 seed 2，**训练设定和 seed 0 完全一样**，用来检验结论是否稳健，并给出均值和方差。
 
-一共 4 个训练任务，每个任务占一张卡。另外用一张卡在训练过程中评测 test 集和大图泛化。集群上剩下的卡**先不要用**，留给后面的消融实验，消融的说明之后另行给出。
+一共 4 个训练任务，每个任务占一张卡。另外 4 张卡跑 4 个**消融实验**，见第 7 节。8 张卡全部用来训练，所以 test 集和大图泛化的评测**等训练全部结束后再做**，见第 4 节。
 
 ## 2. 训练设定（必须和 seed 0 一致，不要改）
 
@@ -116,18 +116,31 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True PROJECT=mis_er700 EXP=<组名>_
    - checkpoint 写在 `runs/cam/mis_er700/<组名>_e100_s<种子>/`。
    - 如果 0–3 号卡被别人占用，换成空闲的卡号。`env.sh` 会拒绝使用正在跑别人进程的卡。
 
-2. **评测队列**，用第 5 张卡，例如 4 号卡。两个队列放在同一张卡上，原机器也是这么做的：
+2. **环境检查**，只在 4 号卡上做一次，做完再启动第 7 节的消融：
+   - 等 `runs/cam/mis_er700/CAMPrior_p1_e100_s1/epoch_init.pt` 出现，训练开始后几分钟就会写出来；
+   - 然后只评测这一个点：
    ```bash
-   E="CAM_tau0.1_e100_s1 CAMPrior_p1_e100_s1 CAM_tau0.1_e100_s2 CAMPrior_p1_e100_s2"
-   mkdir -p runs/cam/mis_er700_test10 runs/cam/mis_er700_large
-   EXPS="$E" SPLIT=test GPU=4 PAR=2 nohup bash cam/scripts/mis/large_curve_er700.sh > runs/cam/mis_er700_test10/queue_s12.log 2>&1 &
-   EXPS="$E" GPU=4 PAR=4 nohup bash cam/scripts/mis/large_curve_er700.sh > runs/cam/mis_er700_large/queue_s12.log 2>&1 &
+   mkdir -p runs/cam/mis_er700_test10
+   EXPS="CAMPrior_p1_e100_s1" SPLIT=test GPU=4 PAR=1 LAST=0 bash cam/scripts/mis/large_curve_er700.sh
    ```
-   - 队列会在训练写出 checkpoint 后，依次评测第 0、10、20、…、100 个 epoch。第 k 个点用的是 `epoch_{k-1}.pt`，第 0 个点用的是未训练权重 `epoch_init.pt`。
-   - test 集用 50 步 × 20 条链；大图泛化按 CAM 论文协议用 200 步 × 20 条链。
-   - 每个检查点：test 约 2 分钟，大图约 8 分钟。
+   - 约 3 分钟。结果在 `runs/cam/mis_er700_test10/CAMPrior_p1_e100_s1/ep000/test_log.txt` 的第一行，判断标准见第 5 节。
 
-3. **时间**：原机器上（2080 Ti），每个 epoch 约 28 分钟，100 个 epoch 约 **2 天**。单个任务显存峰值约 10.2 GB。
+3. **评测队列**，等 8 个训练任务全部结束后再跑。每张卡负责一个训练任务的 test 和大图两个队列：
+   ```bash
+   mkdir -p runs/cam/mis_er700_test10 runs/cam/mis_er700_large
+   i=0
+   for x in CAM_tau0.1_e100_s1 CAMPrior_p1_e100_s1 CAM_tau0.1_e100_s2 CAMPrior_p1_e100_s2 \
+            CAMPrior_p1_warmstart_e100_s0 CAMPrior_p1_refonly_e100_s0 CAMPrior_p1_fixed_e100_s0 CAMPrior_p10_e100_s0; do
+     EXPS="$x" SPLIT=test GPU=$i PAR=2 nohup bash cam/scripts/mis/large_curve_er700.sh > runs/cam/mis_er700_test10/queue_$x.log 2>&1 &
+     EXPS="$x" GPU=$i PAR=4 nohup bash cam/scripts/mis/large_curve_er700.sh > runs/cam/mis_er700_large/queue_$x.log 2>&1 &
+     i=$((i + 1))
+   done
+   ```
+   - 队列依次评测第 0、10、20、…、100 个 epoch。第 k 个点用的是 `epoch_{k-1}.pt`，第 0 个点用的是未训练权重 `epoch_init.pt`。
+   - test 集用 50 步 × 20 条链；大图泛化按 CAM 论文协议用 200 步 × 20 条链。
+   - 每个点：test 约 2 分钟，大图约 8 分钟。每张卡 11 个点，总共约 2 小时。
+
+4. **时间**：原机器上（2080 Ti），每个 epoch 约 28 分钟，100 个 epoch 约 **2 天**。单个任务显存峰值约 10.2 GB。
    - 开跑后看一下前 1–2 个 epoch 的实际速度。如果明显慢于 28 分钟，告诉用户。
    - 如果出现显存不足，先检查卡上有没有别的进程，**不要**改 mini-batch 或其他超参数，先问用户。
 
@@ -170,7 +183,43 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True PROJECT=mis_er700 EXP=<组名>_
    runs/cam/mis_er700/*_s1/  runs/cam/mis_er700/*_s2/          # checkpoint，每个任务约 80 MB
    runs/cam/mis_er700_test10/*_s1/  runs/cam/mis_er700_test10/*_s2/
    runs/cam/mis_er700_large/*_s1/   runs/cam/mis_er700_large/*_s2/
-   runs/cam/mis_er700_test10/queue_s12.log  runs/cam/mis_er700_large/queue_s12.log
+   runs/queue_cam_er700/mis_er700__CAMPrior_p1_*_s0.log  runs/queue_cam_er700/mis_er700__CAMPrior_p10_e100_s0.log   # 消融
+   runs/cam/mis_er700/CAMPrior_p1_*_s0/  runs/cam/mis_er700/CAMPrior_p10_e100_s0/
+   runs/cam/mis_er700_test10/CAMPrior_p1_*_s0/  runs/cam/mis_er700_test10/CAMPrior_p10_e100_s0/
+   runs/cam/mis_er700_large/CAMPrior_p1_*_s0/   runs/cam/mis_er700_large/CAMPrior_p10_e100_s0/
+   runs/cam/mis_er700_test10/queue_*.log  runs/cam/mis_er700_large/queue_*.log
    ```
 3. 不要改 `cam/` 的代码或训练设定。如果发现必须改，先问用户，并在汇报里写明改了什么、为什么改。
 4. 如果要提交：只提交代码和文档，不提交结果（`runs/` 已被 git 忽略），提交里不带任何 AI 署名，推送到 `mis-asbs-energy-base`。原机器上的仓库也在往这个分支推送，先 `git pull` 再提交。
+
+## 7. 消融实验（另外 4 张卡，各 1 个种子）
+
+**目的**：CAMPrior 相对 CAM 改了三处。第一，策略里加了 RLSA 的先验 logit，网络输出层初始化为 0，所以一开始就是 RLSA。第二，KL 的参考对象从均匀翻转换成 RLSA。第三，先验温度和训练温度绑定。消融每次只拿掉一处，用来回答审稿人最可能的质疑："这不就是用 RLSA 做了热启动吗？"
+
+| 组名 | 相对 CAMPrior 先验 τ0=1.0 的改动 | 回答什么问题 |
+|---|---|---|
+| CAMPrior_p1_warmstart | KL 改成对均匀翻转，即 CAM 原来的熵项（`--prior_kl_ref uniform`） | 收益是不是只来自"从 RLSA 出发"。这组的最优策略和 CAM 一样，与 RLSA 无关 |
+| CAMPrior_p1_refonly | 策略里不加先验 logit，KL 仍对 RLSA；网络按 CAM 的方式初始化（`--prior_policy off --residual_init default`） | 不改参数化、只换参考过程，网络学不学得动 |
+| CAMPrior_p1_fixed | 先验温度不随训练温度变化（`--prior_fixed`） | 外层的温度绑定有没有用 |
+| CAMPrior_p10 | 先验 τ0=10（更弱的先验） | 先验强度的最优点。seed 0 的三个点里 1.0 最好，正好在网格边上 |
+
+两个新开关已经有单元测试（`cam/tests/test_cam_prior.py` 的第 5 个测试）：
+- 两个都关掉时，损失和梯度与 CAM 一致（损失差一个常数）；
+- 只做热启动时，最优策略是 CAM 的最优策略。
+
+原机器上也各跑了 1 个 epoch 的冒烟测试：
+- warmstart 起点在 RLSA 水平；
+- refonly 起点在随机网络水平。
+
+其余设定（数据、超参数、100 epoch、单卡）都和第 2 节一样。
+
+**启动**：在第 4 节第 2 步的环境检查通过后，用剩下的 4 张卡：
+```bash
+GPUS="4 5 6 7" SEEDS="0" SET=ablations DRY=1 bash cam/scripts/mis/seeds_er700.sh   # 先看命令
+GPUS="4 5 6 7" SEEDS="0" SET=ablations bash cam/scripts/mis/seeds_er700.sh
+```
+
+**预期**：
+- **起点**：warmstart、fixed、p10 都从 RLSA 出发，未训练时和 CAMPrior 同一水平（p10 的先验更软，起点会低一些）。refonly 从随机网络出发，和 CAM 同一水平。
+- **refonly 可能学得很慢，甚至学不动**：网络要自己从零学出 RLSA 的 logit。学不动本身就是一个结论，照常跑完即可。
+- 和种子实验一样，分数掉下来**不要停**，只有进程报错退出才需要处理。
