@@ -51,6 +51,9 @@ shows only the items below).
     It reads the data from `$CAM_ER700_DIR` and accepts any `<group>_e<E>_s<seed>` run name; the
     untrained weights come from `mis_er700_init2/` if present, else from the run directory.
 13. `scripts/env.sh`: the cache directory can be moved with `CAM_CACHE` (for other machines).
+14. Added `scripts/mis/seeds_er700.sh` (more seeds of CAM tau0=0.1 and CAMPrior prior tau0=1.0 on
+    ER-[700-800], same settings as the seed-0 runs) and `scripts/requirements_env.txt` (pip freeze
+    of the env used for all runs).
 
 `scripts/config.sh` and the other upstream scripts are unchanged and not used by our runner.
 `CAMPrior` runs through the same runner by appending flags, e.g.
