@@ -64,6 +64,10 @@ shows only the items below).
     with the flags of the public `mis_rb_small_cam.sh` / `mis_rb_large_cam.sh`, data from
     `$CAM_RB_DIR` (default `/data/shengyuf/MIS`, byte-identical to the HF release), one process per
     GPU named in `CUDA_VISIBLE_DEVICES`, and `MODE=test DEVICE=cpu` for CPU evaluation.
+18. Added `scripts/mis/rb_runs.sh` (launches CAM / CAMPrior RB runs with the ER protocol: one GPU
+    per run, 1/10 of the official epochs; CAMPrior group names carry the prior's tau0 and d) and
+    `scripts/mis/rb_curve.sh` (RB test-set curve on GPU or CPU, retries a failed point at most
+    twice and waits between passes instead of retrying at once).
 
 `scripts/config.sh` and the other upstream scripts are unchanged and not used by our runner.
 `CAMPrior` runs through the same runner by appending flags, e.g.
