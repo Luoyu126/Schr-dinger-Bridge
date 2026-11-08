@@ -5,7 +5,8 @@
 - 设计决定的依据和完整记录在 `docs/plan.md` §0.7、§0.8。
 - 文献调研在 `docs/related_work_eval.md`。
 - 交接细节（路径、命令、坑）在 `docs/handoff.md`。
-- 另一个集群上的连续臂小试在 `docs/handoff_as_pilots.md`。
+- 另一个集群上的连续臂小试在 `docs/handoff_as_pilots.md`（11-08 起暂停，让位给补种子）。
+- 另一个集群上 CAM 臂补种子在 `docs/handoff_cam_seeds.md`。
 
 本文和它们冲突时，以 `plan.md` 为准。
 
@@ -162,7 +163,10 @@
    - 每组按 validation 挑出的 `best.pt` 在 test 上评测，作为和 CAM 论文 44.16 对齐的最终数字；
    - 补完第 90、100 个 epoch 的 test 和泛化点；
    - 更新网页。
-2. **CAM 臂补种子**：至少再跑 2 个种子，确认 CAMPrior 的优势和 CAM 的不稳定是否稳健。重点组是 CAM τ0=0.1 和 CAMPrior τ0=1.0。
+2. **CAM 臂补种子**（11-08 决定，交给另一个集群，见 `docs/handoff_cam_seeds.md`）：CAM τ0=0.1 和 CAMPrior 先验 τ0=1.0 各补 seed 1、2，设定和 seed 0 完全一致（单卡、batch 1、100 epoch），共 4 张卡，约 2 天。
+   - 不用多卡加速：CAM 代码每个 epoch 固定 1000 张图，多卡会把 batch 变大、更新次数变少，等于换了设定。
+   - 训练效率按“见过的训练图数”报：我们 100 epoch 见过 10 万张图，CAM 论文 1000 epoch 见过 100 万张；按优化步数两边相近（10 万步对约 12.5 万步，论文卡数按官方默认 8 卡推测，待向作者确认）。
+   - 另一个集群剩下的 4 张卡留给消融：只用 RLSA 做热启动但 KL 仍对均匀翻转、只换参考过程但策略里不加先验 logit、先验强度不随训练温度变化（`--prior_fixed`）。
 3. **查 CAMPrior τ0=0.01 大图泛化崩掉的原因**。
 4. **其他数据集**：RB-small、RB-large，数据本机都有。
 5. **连续臂**：根据另一集群的小试结果，定训练步数、裁剪和能量，重跑 AS/ASBS 两臂。
