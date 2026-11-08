@@ -300,7 +300,8 @@ def test_3_minimiser_is_prior_plus_target_over_tau():
             sol, tim, w, tgt = _random_batch(graph, mb, gen, torch.float64)
             prior = (3*torch.randn(mb, graph.num_nodes, generator=gen)).double()
             stub = types.SimpleNamespace(model=FreeResidual(graph.num_nodes, mb, torch.float64),
-                                         tau=tau, lambd=0.0, num_d=0.0)
+                                         tau=tau, lambd=0.0, num_d=0.0, prior_policy=True,
+                                         prior_kl_rlsa=True)
             batch = [sol, tim, w, tgt, prior]
             r_star = (tgt*torch.exp(-(1-w))/tau).T                 # analytic residual
             # (a) gradient of the real train_batch vanishes at the analytic minimiser
@@ -421,6 +422,82 @@ def test_4_tiny_rollout_backward_and_train_loop():
     return (f'rollout {T}x{K} on 2 graphs, {len(losses)} updates, losses '
             f'{[round(v, 3) for v in losses]}; train loop 3 epochs ok, sidecar tau_ratio '
             f'{meta["tau_ratio"]:.3f}, test obj {obj:.2f}')
+
+
+# ---------------------------------------------------------------- (5) ablation switches
+def test_5_ablation_switches():
+    """--prior_policy / --prior_kl_ref: both off == CAM (loss + const, grads, sampler); each one
+    alone changes only its own place; the warm-start-only minimiser is CAM's, not prior + CAM's."""
+    tau, lambd, num_d, mb = 0.07, 0.3, 4.0, 16
+    from utils.graph_ops import g_sum
+    F = torch.nn.functional
+    with TmpDir() as tmp:
+        data = write_dataset(os.path.join(tmp, 'g'), [30, 22], 0.2, seed=7)
+        graph = load_batch(data, [0, 1])
+        gen = torch.Generator().manual_seed(2)
+        sol, tim, w, tgt = _random_batch(graph, mb, gen)
+        prior = 3*torch.randn(mb, graph.num_nodes, generator=gen)     # non-zero prior logits
+        sizes = torch.bincount(graph.batch).double()
+        out = []
+
+        def exact_loss(logits, ref):
+            p = torch.sigmoid(logits)
+            kl = (p*(F.logsigmoid(logits) - F.logsigmoid(ref)) + (1-p)*(F.logsigmoid(-logits) - F.logsigmoid(-ref)))
+            return (-g_sum(p*tgt.T*torch.exp(-(1-w.T)), graph.batch).mean()
+                    + tau*g_sum(kl, graph.batch).mean() + lambd*((g_sum(p, graph.batch)-num_d)**2).mean())
+
+        for policy, ref in (('off', 'uniform'), ('on', 'uniform'), ('off', 'rlsa'), ('on', 'rlsa')):
+            solver = build(CAMPrior, data, residual_init='default', prior_policy=policy, prior_kl_ref=ref)
+            solver.tau, solver.lambd, solver.num_d = tau, lambd, num_d
+            model = solver.model
+            model.zero_grad()
+            loss = CAMPrior.train_batch(solver, graph, [sol, tim, w, tgt, prior])
+            loss.backward()
+            g_new = _grads(model)
+            with torch.no_grad():
+                res = model(graph, sol.T.unsqueeze(-1), tim.T).squeeze(-1)
+                logits = res + prior.T if policy == 'on' else res
+                refl = prior.T if ref == 'rlsa' else torch.zeros_like(res)
+                err = abs(loss.item() - exact_loss(logits, refl).item())
+            assert err < 1e-5, (policy, ref, err)
+            if (policy, ref) == ('off', 'uniform'):
+                # identical to CAM's own train_batch (up to tau*log2 per node and CAM's +1e-6)
+                cam_self = types.SimpleNamespace(model=model, solution_type='node', tau=tau, lambd=lambd,
+                                                 num_d=num_d, loss_func=nn.BCEWithLogitsLoss())
+                model.zero_grad()
+                loss_cam = CAM.train_batch(cam_self, graph, [sol, tim, w, tgt])
+                loss_cam.backward()
+                g_cam = _grads(model)
+                const = tau*math.log(2)*sizes.mean().item()
+                err_cam = abs(loss.item() - loss_cam.item() - const)
+                assert err_cam < tau*sizes.max().item()*2e-6 + 1e-5, err_cam
+                gerr = max((a - b).abs().max().item() for a, b in zip(g_cam, g_new))
+                assert gerr < 1e-4*max(1.0, max(a.abs().max().item() for a in g_cam)), gerr
+                # sampler: flip logits are the network output alone
+                x = torch.randint(0, 2, (graph.num_nodes, 3), generator=gen).float()
+                t_in = torch.zeros_like(x)
+                with torch.no_grad():
+                    fl, pr = solver.flip_logits(graph, x, t_in, 0, 1.0)
+                    net = model(graph, x.unsqueeze(-1), t_in).squeeze(-1)
+                assert torch.equal(fl, net) and pr.abs().max() > 0
+                out.append(f'both off == CAM (|dL - const| {err_cam:.1e}, max|grad diff| {gerr:.1e})')
+            else:
+                out.append(f'policy {policy}/KL {ref}: loss matches formula ({err:.1e})')
+            if ref == 'uniform':
+                assert solver.prior_meta()['prior_kl_ref'] == 'uniform'
+
+        # warm-start only (policy on, KL uniform): the gradient vanishes at r* = target/tau - prior,
+        # i.e. p* = sigmoid(target/tau) does not depend on the prior
+        stub = types.SimpleNamespace(model=FreeResidual(graph.num_nodes, mb, torch.float64), tau=0.3,
+                                     lambd=0.0, num_d=0.0, prior_policy=True, prior_kl_rlsa=False)
+        batch = [b.double() for b in (sol, tim, w, 0.3*tgt, prior/3)]
+        with torch.no_grad():
+            stub.model.r.copy_((batch[3]*torch.exp(-(1-batch[2]))/0.3 - batch[4]).T)
+        CAMPrior.train_batch(stub, graph, batch).backward()
+        g_star = stub.model.r.grad.abs().max().item()
+        assert g_star < 1e-12, g_star
+        out.append(f'warm-start-only minimiser is CAM\'s (|grad| {g_star:.1e})')
+    return '; '.join(out)
 
 
 # ---------------------------------------------------------------- runner
