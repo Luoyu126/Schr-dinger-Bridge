@@ -41,6 +41,10 @@ shows only the items below).
 9. `solvers/meta_solver.py` (unsupervised training loop) and `main.py`: `--save_every_epoch` also
    saves `epoch_XXXX.pt` every epoch (CAMPrior writes its `.prior.json` sidecar next to each), so
    training curves can be re-evaluated offline. Default off; `best.pt` handling is unchanged.
+10. `solvers/meta_solver.py`: with `--save_every_epoch`, the untrained weights are also saved as
+    `epoch_init.pt` before the first epoch (CAMPrior adds its `.prior.json` with ratio 1).
+11. `scripts/env.sh`: `cam_require_gpu` refuses any GPU that runs another user's process
+    (previously GPU 1 was refused unconditionally).
 
 `scripts/config.sh` and the other upstream scripts are unchanged and not used by our runner.
 `CAMPrior` runs through the same runner by appending flags, e.g.

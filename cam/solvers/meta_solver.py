@@ -302,6 +302,10 @@ class ULSolver(NNSolver):
         best_eval = np.inf
         wait = 0
         self.accelerator.wait_for_everyone()
+        # Local patch (see UPSTREAM.md): with --save_every_epoch also keep the untrained weights.
+        if getattr(getattr(self, 'args', None), 'save_every_epoch', False):
+            self.tau = self.temp_scheduler(0)
+            self.save_ckpt(os.path.join(save_dir, 'epoch_init.pt'))
 
         for epoch in range(self.epochs):
             sample_loader = iter(cycle(self.train_loader))
