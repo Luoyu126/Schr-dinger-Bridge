@@ -22,6 +22,8 @@ a forked RNG). Each epoch draws `graphs_per_epoch` training graphs and `samples_
 trajectories on each. Budget unit: one energy-gradient call = one terminal sample.
 Optional training-time annealing of the AM target (temperature and/or a binarization term,
 off by default): AmortizedConfig.temp_start / bin_gamma_start / anneal_epochs.
+Optional MALA refinement of the AM buffer's terminal samples (Dirac source only, off by
+default): AmortizedConfig.mcmc_steps / mcmc_min_temp / mcmc_step.
 """
 from __future__ import annotations
 
@@ -348,6 +350,18 @@ class AmortizedConfig:
     # "linear" as above, or "geometric": T_e = temp_start (T / temp_start)^f (equal epochs per
     # factor of T; for a temp_start orders of magnitude above T)
     temp_schedule: str = "linear"
+    # MCMC refinement of the AM buffer (off by default). Before entering the AM buffer, every
+    # terminal sample x1 takes mcmc_steps MALA steps on exp(-E_tgt / T_e) at the current
+    # training temperature T_e, with step h = c T_e and c adapted toward acceptance 0.57
+    # (initial c = mcmc_step), while T_e >= mcmc_min_temp. With the Dirac source the optimal
+    # path measure is the base bridge mixed over X1 ~ nu_{T_e}, and MALA leaves nu_{T_e}
+    # invariant, so the fixed point of the AM iteration is unchanged; the refinement only
+    # pulls the transient back toward the target (SCLD, arXiv 2412.07081, puts MCMC between
+    # learned transitions). Its energy-gradient calls are counted in mcmc_grad_calls, not in
+    # grad_calls. Evaluation samples are never refined.
+    mcmc_steps: int = 0
+    mcmc_min_temp: float = 0.0
+    mcmc_step: float = 0.015
 
 
 class GraphBuffer:
@@ -407,6 +421,14 @@ class AmortizedTrainer:
             raise ValueError(cfg.temp_schedule)
         if cfg.temp_schedule == "geometric" and cfg.temp_start is not None and cfg.temp_start <= 0:
             raise ValueError("geometric temperature schedule needs temp_start > 0")
+        if cfg.mcmc_steps:
+            if pool.spec.source != "delta":
+                raise ValueError("MCMC refinement of x1 keeps the AM fixed point only with the "
+                                 "Dirac source (refining x1 alone changes the (x0, x1) coupling)")
+            if cfg.bin_gamma_start != 0.0:
+                raise ValueError("MCMC refinement targets E_tgt / T_e; not with bin_gamma_start")
+        self._mcmc_c, self.mcmc_grad_calls = cfg.mcmc_step, 0
+        self._mcmc_stats, self._mcmc_stage = None, []
         self._saved: set = set()
         self._clip_hits = self._clip_total = 0
         self._clip_node_hits = self._clip_node_total = 0
@@ -509,6 +531,32 @@ class AmortizedTrainer:
         return self.rng.integers(0, len(self.pool.g), self.cfg.graphs_per_epoch)
 
     @torch.no_grad()
+    def _refine(self, x, b, T):
+        """cfg.mcmc_steps MALA steps on exp(-E_tgt / T) from x (padded; pad nodes stay 0)."""
+        steps, m = self.cfg.mcmc_steps, b.mask.to(x.dtype)
+        E, G = self.pool.e_tgt(x, b), self.pool.grad_e(x, b)
+        st = {"E1_sampler": float(E.mean()), "raw1_sampler": float((x > 0).sum(-1).float().mean())}
+        acc = 0.0
+        for _ in range(steps):
+            c = self._mcmc_c  # h = c T: drift h grad(E / T) = c grad E, noise sqrt(2 h)
+            y = (x - c * G + math.sqrt(2.0 * c * T) * torch.randn_like(x)) * m
+            Ey, Gy = self.pool.e_tgt(y, b), self.pool.grad_e(y, b)
+            log_a = (E - Ey) / T + (((y - x + c * G) ** 2).sum(-1)
+                                    - ((x - y + c * Gy) ** 2).sum(-1)) / (4.0 * c * T)
+            a = torch.log(torch.rand_like(E)) < log_a
+            x = torch.where(a[:, None], y, x)
+            E = torch.where(a, Ey, E)
+            G = torch.where(a[:, None], Gy, G)
+            rate = float(a.float().mean())
+            acc += rate
+            self._mcmc_c *= math.exp(0.02 * (rate - 0.57))
+        self.mcmc_grad_calls += b.S * steps
+        st.update(E1_refined=float(E.mean()), raw1_refined=float((x > 0).sum(-1).float().mean()),
+                  mcmc_accept=acc / max(steps, 1), mcmc_step=self._mcmc_c, mcmc_temp=T)
+        self._mcmc_stats = st
+        return x
+
+    @torch.no_grad()
     def populate_am(self, init):
         cfg = self.cfg
         gids = self._draw_graphs()
@@ -516,10 +564,15 @@ class AmortizedTrainer:
         self._check(x1, "AM samples")
         self._ke_sum += float(ke.sum())
         self._ke_n += b.S
+        T, gam = self.schedule()
+        self._mcmc_stats = None
+        if cfg.mcmc_steps and T >= cfg.mcmc_min_temp:
+            x1 = self._refine(x1, b, T)
+            self._check(x1, "refined AM samples")
+            self._mcmc_stage.append(self._mcmc_stats)
         ge = self.pool.grad_e(x1, b)
         self.grad_calls += b.S
         extra = {}
-        T, gam = self.schedule()
         g = ge
         if cfg.bin_gamma_start != 0.0:
             extra["gb"] = self.pool.grad_bin(x1, b)
@@ -583,6 +636,8 @@ class AmortizedTrainer:
                "wall": time.time() - self.t_start}
         if self._annealing and stage == "adjoint":
             rec["temp_train"], rec["bin_gamma"] = self.schedule()
+        if stage == "adjoint" and self._mcmc_stats:
+            rec.update(self._mcmc_stats, mcmc_grad_calls=self.mcmc_grad_calls)
         if stage == "adjoint":
             self._am_epochs_done += 1
         if self.out_dir:
@@ -627,6 +682,7 @@ class AmortizedTrainer:
                 self._clip_hits = self._clip_total = 0
                 self._clip_node_hits = self._clip_node_total = 0
                 self._ke_sum, self._ke_n = 0.0, 0
+                self._mcmc_stage = []
                 for blk in order:
                     ls = [self.train_epoch(blk, init=(stage_idx == 1 and blk == order[0]))
                           for _ in range(n_ep[blk])]
@@ -641,6 +697,13 @@ class AmortizedTrainer:
                        "cache_misses": self.pool.misses}
                 if self._annealing:  # schedule of the stage's last AM epoch
                     rec["temp_train"], rec["bin_gamma"] = self.schedule(self._am_epochs_done - 1)
+                if cfg.mcmc_steps:  # refinement over the stage's AM epochs (means; 0 = off)
+                    st = self._mcmc_stage
+                    rec["mcmc_epochs"] = len(st)
+                    rec["mcmc_grad_calls"] = self.mcmc_grad_calls
+                    for k in ("E1_sampler", "E1_refined", "raw1_sampler", "raw1_refined",
+                              "mcmc_accept"):
+                        rec[k] = float(np.mean([s[k] for s in st])) if st else None
                 last = stage_idx == cfg.max_stages or (
                     cfg.max_grad_calls and self.grad_calls >= cfg.max_grad_calls)
                 if self.eval_fn and (stage_idx % cfg.eval_every_stages == 0 or last):
@@ -655,6 +718,8 @@ class AmortizedTrainer:
                           "wall": time.time() - self.t_start, "diverged": str(e)})
         summary = {"status": status, "stages": stage_idx, "grad_calls": self.grad_calls,
                    "wall": time.time() - self.t_start}
+        if cfg.mcmc_steps:
+            summary["mcmc_grad_calls"] = self.mcmc_grad_calls
         if self.out_dir:
             (self.out_dir / "summary.json").write_text(json.dumps(summary))
             if status == "ok":
