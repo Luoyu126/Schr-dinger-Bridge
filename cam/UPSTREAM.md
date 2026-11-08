@@ -60,6 +60,10 @@ shows only the items below).
 16. `solvers/cam_prior.py`: at test time, prior settings that differ from the checkpoint's
     `.prior.json` are an error (previously a warning, so a missing `--prior_d` silently evaluated
     with the default); `--prior_allow_mismatch` keeps the old behaviour on purpose.
+17. Added `scripts/mis/mis_rb_cam.sh`: CAM on RB-[200-300] / RB-[800-1200] (`SCALE=small|large`)
+    with the flags of the public `mis_rb_small_cam.sh` / `mis_rb_large_cam.sh`, data from
+    `$CAM_RB_DIR` (default `/data/shengyuf/MIS`, byte-identical to the HF release), one process per
+    GPU named in `CUDA_VISIBLE_DEVICES`, and `MODE=test DEVICE=cpu` for CPU evaluation.
 
 `scripts/config.sh` and the other upstream scripts are unchanged and not used by our runner.
 `CAMPrior` runs through the same runner by appending flags, e.g.
