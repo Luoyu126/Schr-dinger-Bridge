@@ -45,6 +45,9 @@ shows only the items below).
     `epoch_init.pt` before the first epoch (CAMPrior adds its `.prior.json` with ratio 1).
 11. `scripts/env.sh`: `cam_require_gpu` refuses any GPU that runs another user's process
     (previously GPU 1 was refused unconditionally).
+12. Added `scripts/mis/test_curve_er700.sh` (test-set curve, CPU) and
+    `scripts/mis/large_curve_er700.sh` (ER-[9000-11000] generalisation curve: untrained weights
+    and every 10th epoch, 200 steps x 20 samples, several evaluations at a time on one GPU).
 
 `scripts/config.sh` and the other upstream scripts are unchanged and not used by our runner.
 `CAMPrior` runs through the same runner by appending flags, e.g.
