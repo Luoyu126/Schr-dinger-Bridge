@@ -53,7 +53,7 @@ shows only the items below).
 13. `scripts/env.sh`: the cache directory can be moved with `CAM_CACHE` (for other machines).
 14. Added `scripts/mis/seeds_er700.sh` (more seeds of CAM tau0=0.1 and CAMPrior prior tau0=1.0 on
     ER-[700-800], same settings as the seed-0 runs) and `scripts/requirements_env.txt` (pip freeze
-    of the env used for all runs).
+    of the env used for all runs). With `SET=ablations` it starts the four CAMPrior ablations.
 15. `solvers/cam_prior.py`: ablation switches `--prior_policy {on,off}` (prior in the flip logits
     or not) and `--prior_kl_ref {rlsa,uniform}` (KL to the prior or CAM's entropy term); both
     off reproduce CAM (tests/test_cam_prior.py, test 5). Defaults keep the original behaviour.

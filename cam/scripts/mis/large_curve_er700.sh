@@ -43,7 +43,11 @@ while :; do
             g=${x%_e*_s*}
             declare -A EXTRA=( [CAM_tau0.1]="--tau0 0.1" [CAM_tau0.05]="--tau0 0.05"
               [CAMPrior_p0.01]="--method CAMPrior --prior_tau0 0.01" [CAMPrior_p0.1]="--method CAMPrior --prior_tau0 0.1"
-              [CAMPrior_p1]="--method CAMPrior --prior_tau0 1" )
+              [CAMPrior_p1]="--method CAMPrior --prior_tau0 1"
+              [CAMPrior_p1_warmstart]="--method CAMPrior --prior_tau0 1 --prior_kl_ref uniform"
+              [CAMPrior_p1_refonly]="--method CAMPrior --prior_tau0 1 --prior_policy off"
+              [CAMPrior_p1_fixed]="--method CAMPrior --prior_tau0 1 --prior_fixed"
+              [CAMPrior_p10]="--method CAMPrior --prior_tau0 10" )
             [ -n "${EXTRA[$g]+x}" ] || { echo "FAILED $x ep$k: unknown group $g"; exit 0; }
             mkdir -p "$(dirname "$log")"
             CUDA_VISIBLE_DEVICES=$GPU PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True MODE=test \
