@@ -37,14 +37,24 @@ export OMP_NUM_THREADS="${OMP_NUM_THREADS:-2}"
 mkdir -p "$XDG_CONFIG_HOME" "$HF_HOME" "$TORCH_HOME" "$TRITON_CACHE_DIR" "$TORCHINDUCTOR_CACHE_DIR" \
     "$PYG_HOME" "$CUDA_CACHE_PATH" "$MPLCONFIGDIR" "$TMPDIR" "$WANDB_DIR"
 
-# Refuse to run unless CUDA_VISIBLE_DEVICES names the GPU(s) explicitly and excludes GPU 1,
-# which belongs to another user on this machine.
+# Refuse to run unless CUDA_VISIBLE_DEVICES names the GPU(s) explicitly and none of them runs
+# another user's process.
 cam_require_gpu() {
     if [ -z "${CUDA_VISIBLE_DEVICES:-}" ]; then
         echo "error: set CUDA_VISIBLE_DEVICES to the GPU assigned to this run" >&2
         return 1
     fi
-    case ",${CUDA_VISIBLE_DEVICES}," in
-        *,1,*) echo "error: GPU 1 belongs to another user; do not use it" >&2; return 1 ;;
-    esac
+    # Refuse any GPU that currently runs another user's process (GPU 1 used to be another
+    # user's; it may be used only while it is free).
+    local me g uuid pid owner
+    me=$(id -un)
+    for g in $(echo "$CUDA_VISIBLE_DEVICES" | tr ',' ' '); do
+        uuid=$(nvidia-smi --query-gpu=index,uuid --format=csv,noheader | awk -F', ' -v g="$g" '$1==g {print $2}')
+        for pid in $(nvidia-smi --query-compute-apps=gpu_uuid,pid --format=csv,noheader | awk -F', ' -v u="$uuid" '$1==u {print $2}'); do
+            owner=$(ps -o user= -p "$pid" 2>/dev/null | tr -d ' ')
+            if [ -n "$owner" ] && [ "$owner" != "$me" ]; then
+                echo "error: GPU $g runs a process of user $owner; do not use it" >&2; return 1
+            fi
+        done
+    done
 }
