@@ -52,6 +52,15 @@ scale = the one the checkpoint was trained with), last step soft, then CAM's gre
 The outer scale of a checkpoint is saved next to it as <checkpoint>.prior.json and read at
 test time; --prior_tau_ratio overrides it (1.0 = the epoch-0 / RLSA scale).
 Only node-based problems are supported (like RLSA).
+
+Ablations (docs/status.md): the prior enters CAMPrior in two places, and each can be switched off.
+    --prior_policy off     flip logits = r_theta alone (the prior only enters the KL); use with
+                           --residual_init default, i.e. CAM's own initialisation
+    --prior_kl_ref uniform KL to Ber(1/2) instead of Ber(sigmoid(a)), i.e. CAM's entropy term
+                           (the prior only enters the policy: a warm start at RLSA whose optimum
+                           p* = sigmoid(target * exp(-(1 - w)) / tau_train) is CAM's, not RLSA's)
+With both switched off the loss is CAM's loss plus a constant and the sampler is CAM's
+(tests/test_cam_prior.py checks both).
 """
 import copy
 import importlib
@@ -94,6 +103,10 @@ def add_cam_prior_args(parser):
     g.add_argument('--prior_tau_ratio', type=float, default=None,
                    help='test time: outer factor tau_train/tau_train(0) to use; default: read from '
                         '<checkpoint>' + PRIOR_META_SUFFIX)
+    g.add_argument('--prior_policy', default='on', choices=['on', 'off'],
+                   help='ablation: off = flip logits are the network output alone (prior only in the KL)')
+    g.add_argument('--prior_kl_ref', default='rlsa', choices=['rlsa', 'uniform'],
+                   help="ablation: uniform = KL to Ber(1/2), i.e. CAM's entropy term (prior only in the policy)")
     g.add_argument('--residual_init', default='zero', choices=['zero', 'default'],
                    help='zero-initialise the output head, so that the untrained sampler is RLSA')
     return parser
@@ -152,6 +165,8 @@ class CAMPrior(CAM):
         self.prior_eps = args.prior_eps
         self.prior_fixed = args.prior_fixed
         self.prior_tau_min = args.prior_tau_min
+        self.prior_policy = args.prior_policy == 'on'
+        self.prior_kl_rlsa = args.prior_kl_ref == 'rlsa'
 
         # inner schedule: RLSA's TempScheduler over the num_tp training steps (as in solvers/rlsa.py)
         prior_sched = TempScheduler(args.prior_schedule, args.prior_tau0, args.prior_tau1, 0, self.num_tp, 0)
@@ -205,16 +220,19 @@ class CAMPrior(CAM):
         return diff/(self.prior_taus[k]*ratio)
 
     def flip_logits(self, graph, solution, time, k, ratio, grad=None):
-        """Total flip logits (prior + network residual) and the prior logits."""
+        """Total flip logits (prior + network residual; residual only with --prior_policy off)
+        and the prior logits."""
         prior = self.prior_logits(graph, solution, k, ratio, grad)
         residual = self.model(graph, solution.unsqueeze(-1), time).squeeze(-1)
-        return prior + residual, prior
+        return (prior + residual if self.prior_policy else residual), prior
 
     # ------------------------------------------------------------------ training
     def train_batch(self, graph, batch):
         solution, time, weight, target, prior = (b.T for b in batch)
         residual = self.model(graph, solution.unsqueeze(-1), time).squeeze(-1)
-        return cam_prior_node_loss(prior + residual, prior, target, weight, graph.batch,
+        logits = prior + residual if self.prior_policy else residual
+        ref = prior if self.prior_kl_rlsa else torch.zeros_like(prior)
+        return cam_prior_node_loss(logits, ref, target, weight, graph.batch,
                                    self.tau, self.lambd, self.num_d)
 
     @torch.no_grad()
@@ -295,7 +313,8 @@ class CAMPrior(CAM):
                 'prior_tau0': a.prior_tau0, 'prior_tau1': a.prior_tau1,
                 'prior_schedule': a.prior_schedule, 'prior_d': a.prior_d, 'prior_eps': a.prior_eps,
                 'prior_beta': self.prior_beta, 'prior_tau_min': a.prior_tau_min,
-                'num_tp': self.num_tp, 'beta': a.beta, 'global_step': self.global_step}
+                'num_tp': self.num_tp, 'beta': a.beta, 'global_step': self.global_step,
+                'prior_policy': a.prior_policy, 'prior_kl_ref': a.prior_kl_ref}
 
     def save_ckpt(self, save_file):
         super(CAMPrior, self).save_ckpt(save_file)
@@ -313,8 +332,11 @@ class CAMPrior(CAM):
             current = {'prior_fixed': self.prior_fixed, 'prior_tau0': args.prior_tau0,
                        'prior_tau1': args.prior_tau1, 'prior_schedule': args.prior_schedule,
                        'prior_d': args.prior_d, 'prior_eps': args.prior_eps,
-                       'prior_beta': self.prior_beta, 'num_tp': self.num_tp, 'beta': args.beta}
-            diff = {k: (meta.get(k), v) for k, v in current.items() if meta.get(k) != v}
+                       'prior_beta': self.prior_beta, 'num_tp': self.num_tp, 'beta': args.beta,
+                       'prior_policy': args.prior_policy, 'prior_kl_ref': args.prior_kl_ref}
+            older = {'prior_policy': 'on', 'prior_kl_ref': 'rlsa'}   # sidecars written before the flags
+            diff = {k: (meta.get(k, older.get(k)), v) for k, v in current.items()
+                    if meta.get(k, older.get(k)) != v}
             if diff:
                 self.accelerator.print(f'Warning: CAMPrior settings differ from training ({meta_path}), '
                                        f'(trained, now): {diff}')
