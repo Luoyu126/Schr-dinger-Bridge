@@ -81,6 +81,10 @@ shows only the items below).
     (both stages per seed on one GPU; stage 2 is the CAM tau0=0.1 command of `seeds_er700.sh`
     plus `--checkpoint`).
 21. Added `tests/test_rlsa_distill.py` (CPU, run with `$CAM_PYTHON cam/tests/test_rlsa_distill.py`).
+22. Added `scripts/mis/eval_queue_er700.py`: one evaluation queue on one GPU for every ER-[700-800]
+    run, on both the test and the large graphs, in place of one `large_curve_er700.sh` per split
+    and run set. Same command, protocol and output directories as `large_curve_er700.sh`; the run
+    list is a file re-read at every pass, and evaluations already running elsewhere are skipped.
 
 `scripts/config.sh` and the other upstream scripts are unchanged and not used by our runner.
 `CAMPrior` runs through the same runner by appending flags, e.g.
