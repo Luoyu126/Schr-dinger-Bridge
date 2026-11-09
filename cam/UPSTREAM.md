@@ -68,6 +68,19 @@ shows only the items below).
     per run, 1/10 of the official epochs; CAMPrior group names carry the prior's tau0 and d) and
     `scripts/mis/rb_curve.sh` (RB test-set curve on GPU or CPU, retries a failed point at most
     twice and waits between passes instead of retrying at once).
+19. Added `solvers/rlsa_distill.py` (`RLSADistill`) and the entry point `distill_rlsa.py`: stage 1
+    of the distillation warm start. CAM's network (CAM's own initialisation, flip logits = network
+    alone) is fitted to RLSA's per-step flip probabilities, with the forward KL
+    KL(Ber(RLSA) || Ber(network)) on RLSA rollouts; the teacher is the CAMPrior prior with
+    `--prior_*` (outer factor fixed at 1). Validation is CAM's own inference, and checkpoints are
+    plain CAM state_dicts, so stage 2 is `main.py --method CAM ... --checkpoint <best.pt>`.
+    `distill_rlsa.py` takes main.py's command line with `--method CAMPrior` and swaps in
+    `RLSADistill`; `main.py` itself is unchanged.
+20. Added `scripts/mis/mis_er700_distill.sh` (stage-1 launcher: `mis_er700_cam.sh`'s launch block
+    with `main.py` replaced by `distill_rlsa.py`) and `scripts/mis/distill_warmstart_er700.sh`
+    (both stages per seed on one GPU; stage 2 is the CAM tau0=0.1 command of `seeds_er700.sh`
+    plus `--checkpoint`).
+21. Added `tests/test_rlsa_distill.py` (CPU, run with `$CAM_PYTHON cam/tests/test_rlsa_distill.py`).
 
 `scripts/config.sh` and the other upstream scripts are unchanged and not used by our runner.
 `CAMPrior` runs through the same runner by appending flags, e.g.

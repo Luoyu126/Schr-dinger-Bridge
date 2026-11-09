@@ -206,6 +206,8 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True PROJECT=mis_er700 EXP=<组名>_
 | CAMPrior_p1_fixed | 先验温度不随训练温度变化（`--prior_fixed`） | 外层的温度绑定有没有用 |
 | CAMPrior_p10 | 先验 τ0=10（更弱的先验） | 先验强度的最优点。seed 0 的三个点里 1.0 最好，正好在网格边上 |
 
+**改名（11-09）**：`CAMPrior_p1_warmstart` 在论文和文档里改叫“只用先验参数化”。RLSA 的 logit 在训练和推理时一直加在策略里，所以它不是热启动。目录名和实验名不变，评测脚本靠这个名字找参数。真正的热启动（先把 RLSA 蒸馏进 CAM 的网络，再原样训练 CAM）是另一个基线，见 `docs/status.md` 第 4 节第 3 条。
+
 两个新开关已经有单元测试（`cam/tests/test_cam_prior.py` 的第 5 个测试）：
 - 两个都关掉时，损失和梯度与 CAM 一致（损失差一个常数）；
 - 只做热启动时，最优策略是 CAM 的最优策略。
