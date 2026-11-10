@@ -34,6 +34,10 @@ case "$SET" in
     *) echo "error: SET must be sim, camsub or lin" >&2; exit 1 ;;
 esac
 (CUDA_VISIBLE_DEVICES="$GPU" cam_require_gpu)
+DATA="${CAM_ER700_DIR:-/data/shengyuf/MIS/data_er}"
+for s in er_train er_valid er_test; do
+    if [ ! -d "$DATA/$s" ]; then echo "error: $DATA/$s not found (set CAM_ER700_DIR)" >&2; exit 1; fi
+done
 if [ -e "runs/cam/mis_er700/$exp" ]; then echo "error: runs/cam/mis_er700/$exp exists" >&2; exit 1; fi
 LOGDIR=runs/queue_cam_er700; mkdir -p "$LOGDIR"
 log="$LOGDIR/mis_er700__$exp.log"
