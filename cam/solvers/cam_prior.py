@@ -66,6 +66,9 @@ Training labels (docs/status.md; 11-10 decision): only the label changes, the re
     --label_mode cam       CAM's lean target (default)
     --label_mode sim       simulated label: RLSA rollouts from the two candidate next states
                            (solvers/sim_labels.py), on the GPUs of --label_gpus
+    --label_mode lin       first-order label along the trajectory (solvers/lin_labels.py,
+                           derivation in docs/label_correction.md); own perturbation only, unless
+                           --lin_neighbors (adds the neighbour-reaction term, which diverges)
     --label_frac f         per stored state, round(f * N) nodes sampled uniformly enter the loss
                            (adjoint and KL terms, rescaled by N/m); f = 1 and cam = the original path
 """
@@ -84,6 +87,7 @@ from torch_geometric.utils import to_dense_batch
 
 from .cam import CAM
 from .sim_labels import SimLabelPool, simulated_labels
+from .lin_labels import linear_labels
 from utils.data_utils import BatchBuffer
 from utils.graph_ops import g_sum
 from utils.temp_schedulers import TempScheduler
@@ -122,9 +126,13 @@ def add_cam_prior_args(parser):
                         '(otherwise an error)')
     g.add_argument('--residual_init', default='zero', choices=['zero', 'default'],
                    help='zero-initialise the output head, so that the untrained sampler is RLSA')
-    g.add_argument('--label_mode', default='cam', choices=['cam', 'sim'],
+    g.add_argument('--label_mode', default='cam', choices=['cam', 'sim', 'lin'],
                    help="training label: cam = CAM's lean adjoint target; sim = simulated label, "
-                        'RLSA rollouts from the two candidate next states (solvers/sim_labels.py)')
+                        'RLSA rollouts from the two candidate next states (solvers/sim_labels.py); '
+                        'lin = first-order label along the trajectory (solvers/lin_labels.py)')
+    g.add_argument('--lin_neighbors', action='store_true',
+                   help='lin labels: add the neighbour-reaction term (NAAS Hessian analogue; the '
+                        'recursion diverges, docs/label_correction.md 3.8)')
     g.add_argument('--label_frac', type=float, default=1.0,
                    help='fraction of nodes per stored state that enter the loss (sampled uniformly, '
                         'fresh per graph; the loss is rescaled by num_nodes/m)')
@@ -365,7 +373,7 @@ class CAMPrior(CAM):
         a 0/1 mask column appended."""
         n, Kc, T = graph.num_nodes, self.num_kp, self.num_tp
         solution = torch.randint(0, 2, size=(n, Kc), device=self.accelerator.device, dtype=torch.float)
-        states, times, priors, clips = [], [], [], []
+        states, times, priors, logits_all, clips = [], [], [], [], []
         clip_frequency = np.ceil(self.num_tp/self.num_clips)
         ratio = self.prior_tau_ratio()
         start = 0
@@ -376,6 +384,7 @@ class CAMPrior(CAM):
             logits, prior = self.flip_logits(graph, solution, times[-1], t, ratio,
                                              grad if self.prior_problem is self.problem else None)
             priors.append(prior)
+            logits_all.append(logits)
             flip_prob = torch.sigmoid(logits)
             if ((t+1)%clip_frequency == 0) or (t==self.num_tp-1):
                 clips.append((start, t, grad.clone()))
@@ -419,6 +428,17 @@ class CAMPrior(CAM):
                                 f'for labels; pool stats {pool.stats if pool is not None else "in-process"}')
                 self._label_time = []
 
+        if self.label_mode == 'lin':
+            if graph.num_graphs != 1:
+                raise NotImplementedError('--label_mode lin needs --batch_size 1')
+            A = graph.A.to_dense() if graph.A.layout != torch.strided else graph.A
+            lab = linear_labels(A.float(), graph.b.float(), torch.stack(states + [solution]),
+                                torch.stack(logits_all), torch.stack(priors),
+                                [self.prior_taus[j]*ratio for j in range(T)], self.prior_beta,
+                                self.args.beta, float(self.tau),
+                                neighbors=getattr(self.args, 'lin_neighbors', False))  # T x n x Kc
+            target_all = lab.permute(1, 0, 2)*mask                                 # n x T x Kc
+
         buffer = BatchBuffer()
         for (t0_, t1_, grad) in clips:
             sl = slice(t0_, t1_ + 1)
@@ -427,7 +447,7 @@ class CAMPrior(CAM):
             all_prior = torch.stack(priors[sl], dim=-1)
             all_mask = mask[:, sl].permute(0, 2, 1)
             weight = torch.ones_like(all_time)*(t1_+1)/self.num_tp
-            if self.label_mode == 'sim':
+            if self.label_mode in ('sim', 'lin'):
                 target = target_all[:, sl].permute(0, 2, 1)
             else:
                 target = grad.unsqueeze(-1)*(2*all_data-1)               # CAM's target, as in _generate_data_cam
@@ -477,7 +497,8 @@ class CAMPrior(CAM):
                 'prior_beta': self.prior_beta, 'prior_tau_min': a.prior_tau_min,
                 'num_tp': self.num_tp, 'beta': a.beta, 'global_step': self.global_step,
                 'prior_policy': a.prior_policy, 'prior_kl_ref': a.prior_kl_ref,
-                'label_mode': a.label_mode, 'label_frac': a.label_frac}
+                'label_mode': a.label_mode, 'label_frac': a.label_frac,
+                'lin_neighbors': getattr(a, 'lin_neighbors', False)}
 
     def save_ckpt(self, save_file):
         super(CAMPrior, self).save_ckpt(save_file)
