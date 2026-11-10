@@ -330,6 +330,35 @@ RB-large（还在训；同预算 RLSA 35.50，CAM 论文 1500 epoch 41.25，KaMI
 - 每 10 个 epoch 的评测：`runs/cam/mis_er700_test10/<实验名>/epKKK/` 和 `runs/cam/mis_er700_large/<实验名>/epKKK/`，`test_log.txt` 第一行取负号就是分数。
 - 实验名：`CAM_tau0.1_e100_s{1,2}`、`CAMPrior_p1_e100_s{1,2}`、`CAMPrior_p1_warmstart_e100_s0`（只用先验参数化）、`CAMPrior_p1_refonly_e100_s0`（只换参考过程）、`CAMPrior_p1_fixed_e100_s0`（先验温度不绑定）、`CAMPrior_p10_e100_s0`、`RLSA_distill_p1_s0`（蒸馏第一阶段）、`CAM_tau0.1_distill_e100_s0`（蒸馏第二阶段）。
 
+### 2.8 训练标签消融（11-10 决定，sa 集群）
+
+**问题。** CAMPrior 的参照是 RLSA，翻转概率随状态变；CAM 的训练标签默认“现在翻 i，这个扰动原样传到终点”，只在参照与状态无关时成立。推导、文献对应和小图结果都在 `docs/label_correction.md`。只换标签，其他训练设定（100 个 epoch、先验 τ0=1、种子 0）和 `CAMPrior_p1_e100_s0` 完全一样。
+
+**三组**（ER-[700-800]，种子 0，启动 `cam/scripts/mis/labels_er700.sh`，需要 `CAM_ER700_DIR=/home/shengyuf/yunyi/data/CAM_data/data_er`）
+
+| 组 | 实验名 | 卡 | 速度 | 说明 |
+|---|---|---|---|---|
+| 模拟标签 | `CAMPrior_p1_simlab0.1_e100_s0` | 训练 0，算标签 1、2、3 | 1.82 s/it，约 31 分钟/epoch | 每个状态抽 10% 节点，从两个候选下一状态各跑一条 RLSA（DAM 式 12）；算标签的进程出错会换卡重试、重启或丢掉，绝不退回 CAM 标签 |
+| 对照：CAM 标签抽 10% | `CAMPrior_p1_camlab0.1_e100_s0` | 5 | 1.38 s/it | 同样的抽样和损失缩放，标签是 CAM 原来的 |
+| 一阶标签 | `CAMPrior_p1_linlab_e100_s0` | 6 | 1.6 s/it，约 28 分钟/epoch | 沿轨迹往回算，只保留 i 自己的扰动被 RLSA 吸收的概率和 KL 差；全部节点，不抽样 |
+
+- 模拟标签算标签的日志：`runs/cam/mis_er700/CAMPrior_p1_simlab0.1_e100_s0/sim_labels.log`（每 50 张图记一次耗时和重试/重启次数），目前 0.44 秒/张图，没有出过错。
+- 一阶标签第一次启动时没设 `CAM_ER700_DIR`，找不到数据退出（日志改名为 `*.failed_nodata.log`）；启动脚本现在会先检查数据目录。
+
+**小图检查**（n = 12，3 张图 × 3 个训练阶段，精确值用 2^12 个状态的动态规划算；`cam/scripts/mis/sim_label_check.py`，`cam/scripts/mis/lin_label_check.py`）。和精确最优标签的相关系数：
+
+| 标签 | 残差为 0 | 残差不为 0 |
+|---|---|---|
+| CAM 原标签 | 0.08–0.12 | 0.04–0.13 |
+| 模拟标签，一条 rollout | 0.17–0.34 | — |
+| 模拟标签的期望 | 0.77–0.92 | — |
+| 一阶标签（只看自己，实际用的） | 0.89–0.94 | 0.64–0.86 |
+| 一阶标签（加邻居反应项） | 约 0，数值发散 | 约 0，数值发散 |
+
+- 模拟标签：多卡（两个进程故意出错/退出）算出的和单进程逐位相同；2000 次重复的均值和精确期望一致（3240 个检验，最大 |z| = 3.95）。
+- 一阶标签原推导里有“翻 i 改变邻居翻转概率”的一项（NAAS Hessian 项的离散版本），每一步把伴随放大 1.1–1.35 倍，50 步后到 1e5–1e8。去掉这一项后不会发散，见 `docs/label_correction.md` 3.8 节。
+- 小图上 RLSA 几乎总能把一次翻转修回来（精确标签平均绝对值约 0.05），大图上未必，所以这些数字只说明“CAM 标签在 RLSA 参照下可以严重偏”，不预测大图效果。
+
 ## 3. 连续臂（AS、ASBS）
 
 ### 3.1 已定的设定（`plan.md` §0.8）
@@ -390,9 +419,10 @@ RB-large（还在训；同预算 RLSA 35.50，CAM 论文 1500 epoch 41.25，KaMI
    - 启动：`GPUS="0 1 2" SEEDS="0 1 2" bash cam/scripts/mis/distill_warmstart_er700.sh`（先 `DRY=1` 看命令；`STAGE=1` 只跑蒸馏）。目录 `runs/cam/mis_er700/RLSA_distill_p1_s<seed>/` 和 `CAM_tau0.1_distill_e100_s<seed>/`。
    - 测试：`cam/tests/test_rlsa_distill.py`，5 个。分别检查老师逐步等于 RLSA、损失和梯度、学生就是 CAM 的采样器、训练循环和检查点能被 CAM 加载、第二阶段命令和 CAM 组逐字一致。
    - 风险：RLSA 要用全图第 20 大的 δ，而 CAM 的网络只在邻居间传消息，链的最后几步 logit 又放大到约 50 倍，所以蒸馏可能达不到 RLSA 的水平。另外只在 RLSA 走过的状态上学，有分布偏移；如果偏差大，可改为在网络自己走到的状态上用 RLSA 打标签，但这算换方案，要先问。
-4. **查 CAMPrior τ0=0.01 大图泛化崩掉的原因**。
-5. **其他数据集**：RB-small、RB-large 已于 11-08 晚启动，见 §2.6。之后可以考虑 MaxCut（RLSA 原论文也覆盖 BA 图上的 MaxCut）。
-6. **连续臂**：根据另一集群的小试结果，定训练步数、裁剪和能量，重跑 AS/ASBS 两臂。
+4. **训练标签消融**（11-10 决定，论文的关键消融）：三组已启动，见 §2.8，约 11-12 晚到 11-13 训完。训完后和 `CAMPrior_p1_e100_s0` 用同样的评测（test、大图）比较。
+5. **查 CAMPrior τ0=0.01 大图泛化崩掉的原因**。
+6. **其他数据集**：RB-small、RB-large 已于 11-08 晚启动，见 §2.6。之后可以考虑 MaxCut（RLSA 原论文也覆盖 BA 图上的 MaxCut）。
+7. **连续臂**：根据另一集群的小试结果，定训练步数、裁剪和能量，重跑 AS/ASBS 两臂。
 
 ## 5. 未决问题
 
