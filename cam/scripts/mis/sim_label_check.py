@@ -7,7 +7,8 @@ tau0 = 1 as in the main runs, num_tp = 50, linear inner schedule; d scaled to th
      into two workers, and checks they equal the in-process labels (same seeds);
   2. checks that the mean of many simulated labels equals the exact base expectation
      m_{k+1}(x0) - m_{k+1}(x1) (z-scores);
-  3. compares CAM's lean label, one simulated label, its expectation and the exact optimal label
+  3. compares CAM's lean label, the first-order labels (solvers/lin_labels.py, with and without the
+     neighbour-reaction term), one simulated label, its expectation and the exact optimal label
      V_{k+1}(x0) - V_{k+1}(x1) (soft value at tau_train) at three points of training.
 Writes <out>/report.json and <out>/report.md.
 
@@ -25,6 +26,7 @@ sys.path.insert(0, CAM_ROOT)
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
 
+from solvers.lin_labels import linear_labels  # noqa: E402
 from solvers.sim_labels import SimLabelPool, compute_task  # noqa: E402
 from utils import exact_small as ex  # noqa: E402
 
@@ -41,14 +43,15 @@ def rollout(A, b, temps, d, eps, beta_prior, chains, seed):
     g = torch.Generator().manual_seed(seed)
     n, T = A.shape[0], len(temps)
     x = torch.randint(0, 2, (n, chains), generator=g).double()
-    xs = [x.clone()]
+    xs, zs = [x.clone()], []
     for j in range(T):
         z = ex.flip_logits(A, b, x.T, temps[j], d, eps, beta_prior).T
+        zs.append(z)
         if j == T - 1:
             grad_last = (2*beta_prior*(A@x) + b).clone()
         x = torch.where(torch.rand(n, chains, generator=g, dtype=torch.float64) < torch.sigmoid(z), 1 - x, x)
         xs.append(x.clone())
-    return torch.stack(xs, 1), grad_last
+    return torch.stack(xs, 1), grad_last, torch.stack(zs)
 
 
 def metrics(est, ref):
@@ -111,7 +114,7 @@ def main():
                 m_tab = [t.cpu() for t in ex.backward_tables(A.to(dp_dev), b.to(dp_dev), temps, args.d, eps, beta, beta)]
                 v_tab = [t.cpu() for t in ex.backward_tables(A.to(dp_dev), b.to(dp_dev), temps, args.d, eps, beta, beta, tau=tau)]
                 log(f'graph p={p} seed={gseed} ratio={ratio}: DP tables in {time.time()-t0:.1f}s')
-                X, grad_last = rollout(A, b, temps, args.d, eps, beta, args.chains, 100 + gseed)
+                X, grad_last, Z = rollout(A, b, temps, args.d, eps, beta, args.chains, 100 + gseed)
                 # items (t, c), t-major; all nodes
                 C = T*args.chains
                 x_next = X[:, 1:, :].reshape(n, C)
@@ -142,6 +145,10 @@ def main():
                                    for q, s in enumerate(starts)])
                 e_soft = np.stack([ex.flip_label(v_tab[s], x_next[:, q:q+1], sel[q:q+1], sign[q:q+1])[0].numpy()
                                    for q, s in enumerate(starts)])
+                # first-order label along the same trajectory (residual 0: policy = prior, z = a)
+                # (own perturbation only = the default; lin_nb adds the neighbour-reaction term)
+                lin, lin_nb = [linear_labels(A, b, X.permute(1, 0, 2), Z, Z, temps, beta, beta, tau, neighbors=nb)
+                               .permute(1, 0, 2).reshape(n, C).T.numpy() for nb in (False, True)]
                 # CAM's lean label: grad at X_{T-1} times (2 x_t - 1), for the same (t, c, i)
                 cam = (grad_last.unsqueeze(1)*(2*X[:, :-1, :] - 1)).reshape(n, C).T.numpy()
                 # unbiasedness: R replicate seeds for z_items random items
@@ -168,14 +175,18 @@ def main():
                           max_abs_mean_err=float(np.abs(diff).max()),
                           one_rollout_noise_std=float(np.std(lab - e_mean)),
                           vs_exact_soft=dict(cam=metrics(cam, e_soft), sim_one=metrics(lab, e_soft),
-                                             sim_mean=metrics(e_mean, e_soft)),
+                                             sim_mean=metrics(e_mean, e_soft), lin=metrics(lin, e_soft),
+                                             lin_nb=metrics(lin_nb, e_soft)),
+                          vs_exact_mean=dict(cam=metrics(cam, e_mean), sim_one=metrics(lab, e_mean),
+                                             lin=metrics(lin, e_mean)),
                           vs_exact_soft_late_steps=dict(cam=metrics(cam[late], e_soft[late]),
+                                                        lin=metrics(lin[late], e_soft[late]),
                                                         sim_one=metrics(lab[late], e_soft[late]),
                                                         sim_mean=metrics(e_mean[late], e_soft[late])),
                           sim_one_vs_mean=metrics(lab, e_mean))
                 log(f'  z_max {zmax:.2f} over {z.size} tests; corr with exact optimal label: '
                     f'CAM {ri["vs_exact_soft"]["cam"]["corr"]:.3f}, sim(one) {ri["vs_exact_soft"]["sim_one"]["corr"]:.3f}, '
-                    f'sim(mean) {ri["vs_exact_soft"]["sim_mean"]["corr"]:.3f}')
+                    f'sim(mean) {ri["vs_exact_soft"]["sim_mean"]["corr"]:.3f}, lin {ri["vs_exact_soft"]["lin"]["corr"]:.3f}')
                 gi['ratios'].append(ri)
             report['graphs'].append(gi)
     finally:
@@ -191,7 +202,9 @@ def main():
              '|---|---|---|---|---|---|---|---|---|']
     for g in report['graphs']:
         for r in g['ratios']:
-            for k, name in (('cam', 'CAM'), ('sim_one', 'sim, one rollout'), ('sim_mean', 'sim, expectation')):
+            for k, name in (('cam', 'CAM'), ('lin', 'first-order (own)'),
+                            ('lin_nb', 'first-order (+ neighbours)'), ('sim_one', 'sim, one rollout'),
+                            ('sim_mean', 'sim, expectation')):
                 mm = r['vs_exact_soft'][k]
                 lines.append(f'| p={g["p"]} s={g["seed"]} ({g["edges"]} edges) | {r["tau_train"]:.3g} | '
                              f'{r["z_max"]:.2f} | {name} | {mm["corr"]:.3f} | {mm["sign_agree_nonzero"]:.3f} | '
