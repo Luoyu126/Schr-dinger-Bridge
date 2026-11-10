@@ -86,6 +86,19 @@ shows only the items below).
     and run set. Same command, protocol and output directories as `large_curve_er700.sh`; the run
     list is a file re-read at every pass, and evaluations already running elsewhere are skipped.
 
+23. Added `solvers/sim_labels.py` (simulated training labels: RLSA rollouts from the two candidate
+    next states with common random numbers, and `SimLabelPool`, a fault-tolerant multi-GPU worker
+    pool that retries failed tasks on other workers, splits on OOM, restarts or drops dead or hung
+    workers and falls back to the trainer's device) and `solvers/lin_labels.py` (first-order labels
+    along the trajectory). `solvers/cam_prior.py` gained `--label_mode {cam,sim,lin}`,
+    `--label_frac`, `--label_gpus`, `--label_timeout` and `--lin_neighbors`; with the defaults the
+    original code path runs unchanged. Derivation: `docs/label_correction.md` (repo root).
+24. Added `utils/exact_small.py` (exact expected-energy and soft-value tables of the RLSA base
+    process over all 2^n states, n <= ~12), `scripts/mis/sim_label_check.py` and
+    `scripts/mis/lin_label_check.py` (small-graph checks of the labels against exact values),
+    `scripts/mis/labels_er700.sh` (launcher for the label ablation on ER-[700-800]) and
+    `tests/test_sim_labels.py` (12 tests; `$CAM_PYTHON cam/tests/test_sim_labels.py`).
+
 `scripts/config.sh` and the other upstream scripts are unchanged and not used by our runner.
 `CAMPrior` runs through the same runner by appending flags, e.g.
 `CUDA_VISIBLE_DEVICES=<gpu> EXP=camprior bash cam/scripts/mis/mis_er200_cam.sh --method CAMPrior`.
