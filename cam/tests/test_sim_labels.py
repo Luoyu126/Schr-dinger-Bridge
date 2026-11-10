@@ -266,6 +266,116 @@ def test_8_camprior_item_mapping():
                 assert abs(seen['lab'][q][r] - seen['sign'][q][r]*(g0 - g1)) < 1e-4
 
 
+def naive_linear(A, b, X, z, a, temps, beta_prior, beta, tau, neighbors=False):
+    """Loop version of lin_labels.linear_labels (docs/label_correction.md, 3.5)."""
+    import math
+    K, n, C = z.shape
+    sig = lambda v: 1/(1 + math.exp(-v))
+
+    def kl(zz, aa):
+        p, q = sig(zz), sig(aa)
+        return p*math.log(p/q) + (1 - p)*math.log((1 - p)/(1 - q))
+
+    def dprob(zz, dz, f):
+        p, p2 = sig(zz), sig(zz + dz)
+        return max(0.0, 1 - p2/p) if f else max(0.0, 1 - (1 - p2)/(1 - p))
+
+    out = torch.zeros(K, n, C, dtype=torch.float64)
+    for c in range(C):
+        xK = X[K][:, c]
+        gK = 2*beta*(A@xK) + b.reshape(-1)
+        alpha = [(1 - 2*xK[i].item())*gK[i].item() for i in range(n)]
+        for j in range(K - 1, -1, -1):
+            x = X[j][:, c]
+            f = [(X[j + 1][i, c] != x[i]).item() for i in range(n)]
+            for i in range(n):
+                out[j, i, c] = -(1 - 2*f[i])*alpha[i]
+            if j == 0:
+                break
+            grad = 2*beta_prior*(A@x) + b.reshape(-1)
+            new = []
+            for i in range(n):
+                zi, ai = z[j][i, c].item(), a[j][i, c].item()
+                d_own = -2*(grad[i].item()*(2*x[i].item() - 1)/2)/temps[j]
+                v = (1 - dprob(zi, d_own, f[i]))*alpha[i] + tau*(kl(zi + d_own, ai + d_own) - kl(zi, ai))
+                for l in range(n):
+                    if A[l, i] != 0:
+                        da = beta_prior*A[l, i].item()*(1 - 2*x[i].item())*(2*x[l].item() - 1)/temps[j]
+                        zl, al = z[j][l, c].item(), a[j][l, c].item()
+                        v += tau*(kl(zl + da, al + da) - kl(zl, al))
+                        if neighbors:
+                            v += dprob(zl, da, f[l])*alpha[l]
+                new.append(v)
+            alpha = new
+    return out
+
+
+def _lin_case(n=7, K=5, C=3, seed=0):
+    A, ei, b = er_graph(n, 0.45, seed)
+    A, b = A.double(), b.double()
+    g = torch.Generator().manual_seed(seed + 1)
+    X = torch.randint(0, 2, (K + 1, n, C), generator=g).double()
+    a = torch.randn(K, n, C, generator=g, dtype=torch.float64)*2
+    z = a + torch.randn(K, n, C, generator=g, dtype=torch.float64)
+    temps = [0.7*(1 - j/K) + 0.1 for j in range(K)]
+    return A, b, X, z, a, temps
+
+
+def test_9_linear_labels_equal_naive_loops():
+    from solvers.lin_labels import linear_labels
+    A, b, X, z, a, temps = _lin_case()
+    for nb in (False, True):
+        fast = linear_labels(A, b, X, z, a, temps, 1.02, 1.02, 0.07, chunk=2, neighbors=nb)
+        slow = naive_linear(A, b, X, z, a, temps, 1.02, 1.02, 0.07, neighbors=nb)
+        assert torch.allclose(fast, slow, atol=1e-9), (nb, (fast - slow).abs().max())
+
+
+def test_10_linear_last_step_exact_and_no_kl_at_zero_residual():
+    from solvers.lin_labels import linear_labels
+    A, b, X, z, a, temps = _lin_case(seed=3)
+    K = z.shape[0]
+    out = linear_labels(A, b, X, z, a, temps, 1.02, 1.02, 0.07)
+    xK, xk = X[K], X[K - 1]
+    s = 1 - 2*(xK != xk).double()
+    exact = s*(-(1 - 2*xK)*(2*1.02*(A@xK) + b))
+    assert torch.allclose(out[K - 1], exact, atol=1e-10)
+    # zero residual: the KL term vanishes, so tau does not matter
+    o1 = linear_labels(A, b, X, a, a, temps, 1.02, 1.02, 0.01)
+    o2 = linear_labels(A, b, X, a, a, temps, 1.02, 1.02, 5.0)
+    assert torch.allclose(o1, o2, atol=1e-10)
+
+
+def test_12_linear_own_term_is_contracting():
+    """Zero residual, own perturbation only: |label| at every step <= |terminal adjoint| of that node."""
+    from solvers.lin_labels import linear_labels
+    for seed in range(4):
+        A, b, X, z, a, temps = _lin_case(n=9, K=30, C=4, seed=seed)
+        out = linear_labels(A, b, X, a, a, temps, 1.02, 1.02, 0.07)
+        bound = ((1 - 2*X[-1])*(2*1.02*(A@X[-1]) + b)).abs()
+        assert (out.abs() <= bound.unsqueeze(0) + 1e-12).all()
+
+
+def test_11_camprior_linear_path():
+    import test_cam_prior as tcp
+    with tcp.TmpDir() as tmp:
+        data = tcp.write_dataset(os.path.join(tmp, 'g'), [13], 0.3, 2)
+        graph = tcp.load_batch(data)
+        lin = _camprior(data, label_mode='lin')
+        torch.manual_seed(4)
+        out = lin.generate_data(graph)
+        ref = _camprior(data)
+        ref.model.load_state_dict(lin.model.state_dict())
+        torch.manual_seed(4)
+        ref_out = ref.generate_data(graph)
+        for o, r in zip(out, ref_out):                       # same rollout, all nodes in the loss
+            assert torch.equal(o[0], r[0]) and o[5].sum().item() == 13
+        tgt = torch.stack([o[3] for o in out])
+        assert torch.isfinite(tgt).all()
+        loss = lin.train_batch(graph, [torch.stack(c) for c in zip(*[out[i] for i in range(6)])])
+        loss.backward()
+        assert torch.isfinite(loss)
+
+
 def main():
     tests = [(k, v) for k, v in sorted(globals().items()) if k.startswith('test_') and callable(v)]
     failed = 0
