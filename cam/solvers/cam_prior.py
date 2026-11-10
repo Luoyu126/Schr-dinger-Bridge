@@ -61,11 +61,20 @@ Ablations (docs/status.md): the prior enters CAMPrior in two places, and each ca
                            p* = sigmoid(target * exp(-(1 - w)) / tau_train) is CAM's, not RLSA's)
 With both switched off the loss is CAM's loss plus a constant and the sampler is CAM's
 (tests/test_cam_prior.py checks both).
+
+Training labels (docs/status.md; 11-10 decision): only the label changes, the rest of training not.
+    --label_mode cam       CAM's lean target (default)
+    --label_mode sim       simulated label: RLSA rollouts from the two candidate next states
+                           (solvers/sim_labels.py), on the GPUs of --label_gpus
+    --label_frac f         per stored state, round(f * N) nodes sampled uniformly enter the loss
+                           (adjoint and KL terms, rescaled by N/m); f = 1 and cam = the original path
 """
+import atexit
 import copy
 import importlib
 import json
 import os
+import time
 
 import numpy as np
 import torch
@@ -74,6 +83,7 @@ from torch import nn
 from torch_geometric.utils import to_dense_batch
 
 from .cam import CAM
+from .sim_labels import SimLabelPool, simulated_labels
 from utils.data_utils import BatchBuffer
 from utils.graph_ops import g_sum
 from utils.temp_schedulers import TempScheduler
@@ -112,6 +122,17 @@ def add_cam_prior_args(parser):
                         '(otherwise an error)')
     g.add_argument('--residual_init', default='zero', choices=['zero', 'default'],
                    help='zero-initialise the output head, so that the untrained sampler is RLSA')
+    g.add_argument('--label_mode', default='cam', choices=['cam', 'sim'],
+                   help="training label: cam = CAM's lean adjoint target; sim = simulated label, "
+                        'RLSA rollouts from the two candidate next states (solvers/sim_labels.py)')
+    g.add_argument('--label_frac', type=float, default=1.0,
+                   help='fraction of nodes per stored state that enter the loss (sampled uniformly, '
+                        'fresh per graph; the loss is rescaled by num_nodes/m)')
+    g.add_argument('--label_gpus', default='',
+                   help='physical GPU ids for the sim-label workers, e.g. 4,5,6,7 (empty: compute '
+                        "in-process on the trainer's device)")
+    g.add_argument('--label_timeout', type=float, default=900.0,
+                   help='seconds after which a sim-label task counts as hung (worker restarted)')
     return parser
 
 
@@ -150,12 +171,20 @@ def bernoulli_kl_logits(logits, ref_logits):
             + (1 - p) * (F.logsigmoid(-logits) - F.logsigmoid(-ref_logits)))
 
 
-def cam_prior_node_loss(logits, prior_logits, target, weight, graph_idx, tau, lambd, num_d):
-    """CAM's node loss (solvers/cam.py) with -tau*H(p) replaced by tau*KL(Ber(p) || Ber(p_ref))."""
+def cam_prior_node_loss(logits, prior_logits, target, weight, graph_idx, tau, lambd, num_d,
+                        mask=None, scale=1.0):
+    """CAM's node loss (solvers/cam.py) with -tau*H(p) replaced by tau*KL(Ber(p) || Ber(p_ref)).
+
+    mask (0/1, like logits): only these nodes enter the adjoint and KL terms, and both are
+    multiplied by scale (num_nodes/m for m sampled nodes per state), so the loss is an unbiased
+    estimate of the full one and each node's minimiser is unchanged."""
     prob = torch.sigmoid(logits)
     kl = bernoulli_kl_logits(logits, prior_logits.detach())
-    return (-g_sum(prob*target*torch.exp(-1*(1-weight)), graph_idx).mean()
-            + tau*g_sum(kl, graph_idx).mean()
+    adj = prob*target*torch.exp(-1*(1-weight))
+    if mask is not None:
+        adj, kl = adj*mask, kl*mask
+    return (-scale*g_sum(adj, graph_idx).mean()
+            + tau*scale*g_sum(kl, graph_idx).mean()
             + lambd*((g_sum(prob, graph_idx)-num_d)**2).mean())
 
 
@@ -170,6 +199,17 @@ class CAMPrior(CAM):
         self.prior_tau_min = args.prior_tau_min
         self.prior_policy = args.prior_policy == 'on'
         self.prior_kl_rlsa = args.prior_kl_ref == 'rlsa'
+        self.label_mode = args.label_mode
+        self.label_frac = args.label_frac
+        if not 0 < self.label_frac <= 1:
+            raise ValueError(f'--label_frac must be in (0, 1], got {self.label_frac}')
+        self.label_gpus = [g for g in str(args.label_gpus).replace(' ', '').split(',') if g]
+        self.label_timeout = args.label_timeout
+        self.label_scale = 1.0
+        self._label_pool = None
+        self._mask_gen = None
+        self._label_iter = 0
+        self._label_time = []
 
         # inner schedule: RLSA's TempScheduler over the num_tp training steps (as in solvers/rlsa.py)
         prior_sched = TempScheduler(args.prior_schedule, args.prior_tau0, args.prior_tau1, 0, self.num_tp, 0)
@@ -231,15 +271,24 @@ class CAMPrior(CAM):
 
     # ------------------------------------------------------------------ training
     def train_batch(self, graph, batch):
-        solution, time, weight, target, prior = (b.T for b in batch)
+        cols = [b.T for b in batch]
+        solution, time, weight, target, prior = cols[:5]
+        mask = cols[5] if len(cols) > 5 else None          # only with --label_mode sim / --label_frac < 1
         residual = self.model(graph, solution.unsqueeze(-1), time).squeeze(-1)
         logits = prior + residual if self.prior_policy else residual
         ref = prior if self.prior_kl_rlsa else torch.zeros_like(prior)
         return cam_prior_node_loss(logits, ref, target, weight, graph.batch,
-                                   self.tau, self.lambd, self.num_d)
+                                   self.tau, self.lambd, self.num_d,
+                                   mask=mask, scale=self.label_scale if mask is not None else 1.0)
 
     @torch.no_grad()
     def generate_data(self, graph):
+        if self.label_mode == 'cam' and self.label_frac >= 1:
+            return self._generate_data_cam(graph)
+        return self._generate_data_labels(graph)
+
+    @torch.no_grad()
+    def _generate_data_cam(self, graph):
         # Same rollout as CAM.generate_data (node case); the flip logits include the prior, and the
         # prior logits are stored with each state for the KL term.
         solution = torch.randint(0, 2, size=(graph.num_nodes, self.num_kp),
@@ -274,6 +323,116 @@ class CAMPrior(CAM):
             rr = torch.rand_like(solution)
             solution = torch.where(rr<flip_prob, 1-solution, solution)
 
+        return buffer.get_dataset()
+
+    # ------------------------------------------------------------------ simulated labels / subsampling
+    def _label_log(self, msg):
+        self.accelerator.print(msg)
+        save_dir = getattr(self.args, 'save_dir', None)
+        if save_dir and self.accelerator.is_local_main_process:
+            os.makedirs(save_dir, exist_ok=True)
+            with open(os.path.join(save_dir, 'sim_labels.log'), 'a') as f:
+                f.write(time.strftime('%Y-%m-%d %H:%M:%S ') + msg + '\n')
+
+    def label_pool(self):
+        if self.label_mode != 'sim' or not self.label_gpus:
+            return None
+        if self._label_pool is None:
+            self._label_pool = SimLabelPool(self.label_gpus, fallback=self.accelerator.device,
+                                            timeout=self.label_timeout, log=self._label_log)
+            atexit.register(self._label_pool.close)
+        return self._label_pool
+
+    def _sample_mask(self, n, cols):
+        """m nodes per column, uniformly without replacement; own generator, so the rollout's
+        random numbers are the same as without subsampling."""
+        dev = self.accelerator.device
+        if self._mask_gen is None:
+            self._mask_gen = torch.Generator(device=dev)
+            self._mask_gen.manual_seed(int(self.args.seed)*1000003 + 7919)
+        m = max(1, int(round(self.label_frac*n)))
+        if m >= n:
+            idx = torch.arange(n, device=dev).unsqueeze(1).expand(n, cols)
+        else:
+            idx = torch.rand(n, cols, generator=self._mask_gen, device=dev).topk(m, dim=0).indices
+        return idx, m                                                    # m x cols
+
+    @torch.no_grad()
+    def _generate_data_labels(self, graph):
+        """The rollout of _generate_data_cam (same random numbers), then per stored state m sampled
+        nodes enter the loss (--label_frac) with CAM's target (--label_mode cam) or the simulated
+        label (--label_mode sim). Buffer rows are in the same order as in _generate_data_cam, with
+        a 0/1 mask column appended."""
+        n, Kc, T = graph.num_nodes, self.num_kp, self.num_tp
+        solution = torch.randint(0, 2, size=(n, Kc), device=self.accelerator.device, dtype=torch.float)
+        states, times, priors, clips = [], [], [], []
+        clip_frequency = np.ceil(self.num_tp/self.num_clips)
+        ratio = self.prior_tau_ratio()
+        start = 0
+        for t in range(T):
+            times.append(torch.ones_like(solution)*t/self.num_tp)
+            states.append(solution.clone())
+            _, grad = self.problem.energy_func(graph, solution, True)
+            logits, prior = self.flip_logits(graph, solution, times[-1], t, ratio,
+                                             grad if self.prior_problem is self.problem else None)
+            priors.append(prior)
+            flip_prob = torch.sigmoid(logits)
+            if ((t+1)%clip_frequency == 0) or (t==self.num_tp-1):
+                clips.append((start, t, grad.clone()))
+                start = t + 1
+            rr = torch.rand_like(solution)
+            solution = torch.where(rr<flip_prob, 1-solution, solution)
+        nexts = states[1:] + [solution]                                  # X_{t+1}
+
+        S = torch.stack(states, dim=1)                                   # n x T x Kc (items t-major)
+        idx, m = self._sample_mask(n, T*Kc)                              # m x (T*Kc)
+        mask = torch.zeros(n, T*Kc, device=S.device).scatter_(0, idx, 1.0).reshape(n, T, Kc)
+        self.label_scale = n/m
+
+        if self.label_mode == 'sim':
+            if graph.num_graphs != 1:
+                raise NotImplementedError('--label_mode sim needs --batch_size 1')
+            t0 = time.time()
+            Xn = torch.stack(nexts, dim=1).reshape(n, T*Kc)
+            flipped = (Xn != S.reshape(n, T*Kc)).float()
+            sel = idx.T.contiguous()                                     # C x m
+            sign = 1 - 2*torch.gather(flipped, 0, idx).T                 # C x m
+            starts = np.repeat(np.arange(1, T + 1), Kc)
+            self._label_iter += 1
+            base = (int(self.args.seed) + 1)*10**12 + self._label_iter*10**5
+            ew = getattr(graph, 'edge_weight', None)
+            common = dict(edge_index=graph.edge_index.cpu().numpy(), n=n,
+                          edge_weight=None if ew is None else ew.cpu().numpy(),
+                          b=graph.b.cpu().numpy(), temps=[self.prior_taus[j]*ratio for j in range(T)],
+                          d=self.prior_d, eps=self.prior_eps, beta_prior=self.prior_beta,
+                          beta=self.args.beta, graph_key=self._label_iter)
+            lab = simulated_labels(self.label_pool(), self.accelerator.device, common,
+                                   Xn.to(torch.uint8).cpu().numpy(), sel.cpu().numpy(),
+                                   sign.cpu().numpy(), starts, base + np.arange(T*Kc))
+            target_all = torch.zeros(n, T*Kc, device=S.device)
+            target_all.scatter_(0, idx, torch.as_tensor(lab, device=S.device).T)
+            target_all = target_all.reshape(n, T, Kc)
+            self._label_time.append(time.time() - t0)
+            if len(self._label_time) == 50:
+                pool = self._label_pool
+                self._label_log(f'[sim-labels] last 50 graphs: {np.mean(self._label_time):.2f}s/graph '
+                                f'for labels; pool stats {pool.stats if pool is not None else "in-process"}')
+                self._label_time = []
+
+        buffer = BatchBuffer()
+        for (t0_, t1_, grad) in clips:
+            sl = slice(t0_, t1_ + 1)
+            all_data = torch.stack(states[sl], dim=-1)
+            all_time = torch.stack(times[sl], dim=-1)
+            all_prior = torch.stack(priors[sl], dim=-1)
+            all_mask = mask[:, sl].permute(0, 2, 1)
+            weight = torch.ones_like(all_time)*(t1_+1)/self.num_tp
+            if self.label_mode == 'sim':
+                target = target_all[:, sl].permute(0, 2, 1)
+            else:
+                target = grad.unsqueeze(-1)*(2*all_data-1)               # CAM's target, as in _generate_data_cam
+            columns = [c.flatten(1).unbind(1) for c in (all_data, all_time, weight, target, all_prior, all_mask)]
+            buffer.add(list(zip(*columns)))
         return buffer.get_dataset()
 
     # ------------------------------------------------------------------ inference
@@ -317,7 +476,8 @@ class CAMPrior(CAM):
                 'prior_schedule': a.prior_schedule, 'prior_d': a.prior_d, 'prior_eps': a.prior_eps,
                 'prior_beta': self.prior_beta, 'prior_tau_min': a.prior_tau_min,
                 'num_tp': self.num_tp, 'beta': a.beta, 'global_step': self.global_step,
-                'prior_policy': a.prior_policy, 'prior_kl_ref': a.prior_kl_ref}
+                'prior_policy': a.prior_policy, 'prior_kl_ref': a.prior_kl_ref,
+                'label_mode': a.label_mode, 'label_frac': a.label_frac}
 
     def save_ckpt(self, save_file):
         super(CAMPrior, self).save_ckpt(save_file)
