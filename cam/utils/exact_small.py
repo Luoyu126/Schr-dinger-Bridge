@@ -43,8 +43,8 @@ def backward_tables(A, b, temps, d, eps, beta_prior, beta, tau=None):
     """[F_0, ..., F_K] over all states: expected energy (tau None) or soft value at temperature tau."""
     n = A.shape[0]
     A, b = A.double(), b.double().reshape(-1)
-    X = all_states(n)
-    idx = torch.arange(2**n)
+    X = all_states(n).to(A.device)
+    idx = torch.arange(2**n, device=A.device)
     xor = idx.unsqueeze(1) ^ idx.unsqueeze(0)                            # [x, f] -> x XOR f
     g = energies(A, b, beta, X)
     K = len(temps)
