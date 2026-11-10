@@ -8,6 +8,7 @@
 - 另一个集群上的连续臂小试在 `docs/handoff_as_pilots.md`（11-08 起暂停，让位给补种子）。
 - 另一个集群上 CAM 臂补种子在 `docs/handoff_cam_seeds.md`。
 - 补种子、消融和蒸馏热启动在 sa 集群（sa.lti.cs.cmu.edu）上跑，结果见 §2.7，运行细节见 `docs/handoff_cam_sa_cluster.md`。
+- ER 种子 0 的五组和 RB-small、RB-large 在原集群（sd.lti.cs.cmu.edu）上跑，结果汇总和运行细节见 `docs/handoff_cam_sd_cluster.md`。
 
 本文和它们冲突时，以 `plan.md` 为准。
 
