@@ -45,7 +45,7 @@
   - `CUDA_DEVICE_ORDER=PCI_BUS_ID`。
 - 系统的 `python3`（anaconda 3.9）可以只读地用来跑不依赖 torch 的小脚本，比如评测队列和汇报页面生成器。
 - **限制**：
-  - **不能 push**：没有 GitHub 凭据。本地比 origin 多 21 个提交（含本文），要用户自己推。
+  - **推送**：用 `/home/shengyuf/yunyi/.ssh/id_ed25519_github` 这把 SSH key（11-10 建的，公钥由用户加到 GitHub），仓库的本地 git 配置已经指向它，直接 `git push origin mis-asbs-energy-base` 即可。细节见 `AGENTS.md` 的 "Pushing from the sa cluster"。
   - 本机没有 node，也没有浏览器，发布页面前没法看渲染效果。
   - `/var/log/kern.log` 和 `dmesg` 没有读权限，看不到 GPU 的 Xid 错误码。
   - 沙箱不允许下载并运行外部二进制，比如 NVIDIA 的 compute-sanitizer。
@@ -195,7 +195,7 @@ GPUS="<卡1> <卡2>" SEEDS="1 2" bash cam/scripts/mis/distill_warmstart_er700.sh
 
    包放在 `/home/shengyuf/yunyi/` 下，由用户拷回原机器，图由原机器统一画。checkpoint 每个实验约 80 MB。
 5. **文档**：结果全部出来后，把数字补进 `docs/status.md`。改之前先问用户要不要改、怎么写。
-6. **推送**：本地多出来的提交要用户推，或者用户给凭据。
+6. **推送**：用户把公钥加到 GitHub 之后，先 `ssh -T` 测试一次，再把本地多出来的提交推到 `mis-asbs-energy-base`。如果远程有新提交，先 `git pull --rebase`。
 
 ## 9. 踩过的坑
 

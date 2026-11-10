@@ -13,6 +13,15 @@ Guidelines for any AI coding agent working in this repository.
 - Commit and push to the remote (`git push origin <branch>`) as soon as a unit of work is finished. Don't let finished work pile up locally.
 - Before you push, make sure the code at least imports/runs and any existing tests pass.
 
+### Pushing from the sa cluster (sa.lti.cs.cmu.edu)
+- The SSH key for pushing is `/home/shengyuf/yunyi/.ssh/id_ed25519_github` (public key next to it, `.pub`). GitHub's host key is pinned in `/home/shengyuf/yunyi/.ssh/known_hosts`. It is deliberately not in `~/.ssh`, because files on this cluster go only under `/home/shengyuf/yunyi/`.
+- The clone at `/home/shengyuf/yunyi/Schrödinger Bridge/Schr-dinger-Bridge` already uses it: fetch stays on HTTPS, push goes to `git@github.com:Luoyu126/Schr-dinger-Bridge.git`. In a fresh clone, set it up again:
+  ```bash
+  git config --local core.sshCommand "ssh -i /home/shengyuf/yunyi/.ssh/id_ed25519_github -o IdentitiesOnly=yes -o UserKnownHostsFile=/home/shengyuf/yunyi/.ssh/known_hosts -o StrictHostKeyChecking=yes"
+  git remote set-url --push origin git@github.com:Luoyu126/Schr-dinger-Bridge.git
+  ```
+- Never print, copy, or commit the private key.
+
 ### Each commit is one self-contained module
 - Every commit has to stand on its own (自成一体): one complete feature, module, or piece of functionality.
 - Split work by functional module. **Do not** commit all code and docs in one large commit.
