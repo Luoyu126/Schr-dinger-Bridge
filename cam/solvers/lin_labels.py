@@ -15,13 +15,14 @@ kappa(a, r) = KL(Ber(sigmoid(a + r)) || Ber(sigmoid(a))). The label of node i at
     T_i(k) = -s_i(k) alpha_{k+1}(i),  s_i(k) = +1 if i was not flipped at step k, -1 if it was,
 the same convention as the simulated labels (solvers/sim_labels.py).
 
-The bracketed neighbour-reaction term (neighbors=True) is the discrete analogue of NAAS's Hessian
-term. It makes the recursion explode: each step multiplies alpha by (1 - pi_i) + sum_l pi_l, which is
-1.1-1.35 on average on the n = 12 check graphs, so labels reach 1e5-1e8 after 50 steps (first-order
-additivity counts every cascade path separately, while the true difference set saturates). The
-default (neighbors=False) keeps only i's own perturbation, absorbed with probability pi_i; its gain
-is <= 1. On the small-graph check it has correlation 0.89-0.94 with the exact optimal label
-(docs/label_correction.md, section 3.8).
+Not used in the experiments (11-10 decision, docs/label_correction.md section 3.8). With the
+bracketed neighbour-reaction term (neighbors=True, the discrete analogue of NAAS's Hessian term) the
+recursion diverges: each step multiplies alpha by (1 - pi_i) + sum_l pi_l, 1.1-1.35 on average on the
+n = 12 check graphs, because first-order additivity counts every cascade path of an O(1) bit flip
+separately while the true difference set saturates. Without it (neighbors=False) the recursion is
+contracting, but at residual 0 the label is the terminal toggle difference times the probability that
+RLSA never undoes the flip: it only shrinks labels and never changes their sign. Kept to reproduce the
+small-graph numbers.
 """
 import torch
 import torch.nn.functional as F
