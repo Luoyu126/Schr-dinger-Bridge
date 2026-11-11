@@ -98,6 +98,9 @@ shows only the items below).
     `scripts/mis/lin_label_check.py` (small-graph checks of the labels against exact values),
     `scripts/mis/labels_er700.sh` (launcher for the label ablation on ER-[700-800]) and
     `tests/test_sim_labels.py` (12 tests; `$CAM_PYTHON cam/tests/test_sim_labels.py`).
+25. Added `scripts/mcut/mcut_ba_large_local.sh`: MaxCut BA-[800-1200] from a local copy of the HF
+    `MCut.zip` (`$CAM_MCUT_DIR`), hyperparameters of `scripts/mcut/mcut_ba_large_cam.sh`, the
+    runner conventions of `scripts/mis/mis_er700_cam.sh` (one launch per GPU set, `MODE=test`).
 
 `scripts/config.sh` and the other upstream scripts are unchanged and not used by our runner.
 `CAMPrior` runs through the same runner by appending flags, e.g.
