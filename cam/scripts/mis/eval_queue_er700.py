@@ -39,6 +39,8 @@ GROUP_FLAGS = {
     'CAMPrior_p1_fixed': ['--method', 'CAMPrior', '--prior_tau0', '1', '--prior_fixed'],
     'CAMPrior_p10': ['--method', 'CAMPrior', '--prior_tau0', '10'],
     'CAM_tau0.1_distill': ['--tau0', '0.1'],     # stage 2 of the distillation warm start: plain CAM
+    # stage 2 of the distillation warm start with the KL reference kept at RLSA (prior only in the reference)
+    'CAMPrior_p1_distill_refrlsa': ['--method', 'CAMPrior', '--prior_tau0', '1', '--prior_policy', 'off'],
 }
 SPLITS = {  # name: (test dir, num_t, output dir)
     'test': ('er_test', 50, 'runs/cam/mis_er700_test10'),
