@@ -1,4 +1,4 @@
-# 项目状态（2026-11-10，分支 `mis-asbs-energy-base`）
+# 项目状态（2026-11-12，分支 `mis-asbs-energy-base`）
 
 这份文档汇总到目前为止做了什么、结果如何、现在在跑什么、下一步做什么。
 
@@ -145,7 +145,7 @@
 
 ---
 
-### 2.6 RB-small 和 RB-large（11-08 晚启动，种子 0）
+### 2.6 RB-small 和 RB-large（原集群，种子 0，11-11 全部完成）
 
 **为什么做**：把 ER 上的结论横向推广到 CAM 论文里另外两个 MIS 数据集。CAM 论文在 MIS 上训了 3 个独立模型：ER-[700-800]、RB-[200-300]（small）和 RB-[800-1200]（large）。ER-[9000-11000] 只做迁移测试，不单独训练（论文 §5.1，官方脚本 `mis_rb_{small,large}_cam.sh`，huggingface 上的 3 个 checkpoint）。
 
@@ -184,13 +184,9 @@
 - **RB-small 接近饱和**：CAM 论文 19.91，KaMIS 20.10，每张图的标准差约 1.5，最终分数大概率分不出高下，差别主要会体现在训练早期。RB-large 上 CAM 离 KaMIS 还差 4.4%，是主要看点。
 - **KaMIS 参考值不是同一个 test 集**：论文里 RB 的 KaMIS 和 Gurobi 数字是从 DiffUCO 转引的，用的是 500 张图的另一个 test 集，所以和 KaMIS 的差距只能算近似。
 
-**评测**：
-- `cam/scripts/mis/rb_curve.sh` 在 3 号卡上跑，每个规模一条队列，各 1000 张 test 图，50 步 × 20 条链。评测的 epoch 是 0、1、2、5、10、20、…，加上训练结束后的 best.pt。
-- 结果在 `runs/cam/mis_rb_{small,large}_test/`。
-- 3 号卡之前是别的用户的。如果又被占用，队列会被拒绝，同一个点最多重试 2 次就放弃，之后改用 CPU 评测（`DEVICE=cpu`）。
+**评测**：`cam/scripts/mis/rb_curve.sh`，每个规模 1000 张 test 图，50 步 × 20 条链；评测第 0、1、2、5、10、20、… 个 epoch，加上训练结束后的 best.pt，结果在 `runs/cam/mis_rb_{small,large}_test/`。评测卡先后被别的用户占用过几次（2、3、5 号卡），被放弃的点都在空出来的卡上补齐了，所有点都在 GPU 上评测。
 
-**运行位置**：
-- 训练：4–7 号卡。日志在 `runs/queue_cam_rb/`，checkpoint 在 `runs/cam/mis_rb_{small,large}/<组>/`。
+**运行位置**：训练在 4–7 号卡（RB-small 11-10 凌晨训完，RB-large 11-11 15:30 训完）。日志在 `runs/queue_cam_rb/`，checkpoint 在 `runs/cam/mis_rb_{small,large}/<组>/`。
 
 **结果（种子 0，两个规模都已训完）**：test 每个规模 1000 张图，50 步 × 20 条链。
 
@@ -210,7 +206,18 @@ RB-large（11-11 训完；同预算 RLSA 35.50，CAM 论文 1500 epoch 41.25，K
 
 - RB-small：CAMPrior 每个点都领先，后期稳定领先约 0.2；best.pt 是 19.93 对 19.78。
 - RB-large：前 2 个 epoch CAMPrior 小幅下滑，第 5 个 epoch 起每个点都领先，第 20 个 epoch 差距最大（39.80 对 34.64）；best.pt 41.34 对 41.07，和 CAM 论文训练 1500 epoch 的 41.25 持平。没有出现 ER 上那种最后一个 epoch 掉分。完整曲线见 `docs/handoff_cam_sd_cluster.md` §4。
-- 评测中途 2、3 号卡被别的用户占用过两次，被放弃的点已在 4、5 号卡上补齐。
+
+**种子 0，三个 MIS 数据集汇总**（都取按 validation 挑出的 best.pt；test 集分别是 128 / 1000 / 1000 张图）
+
+| | ER-[700-800] | RB-small | RB-large |
+|---|---|---|---|
+| CAM τ0=0.1 | 44.04 | 19.78 | 41.07 |
+| CAMPrior 先验 τ0=1.0（RB-small d=5，RB-large d=20） | **44.18** | **19.93** | **41.34** |
+| 同预算 RLSA（validation 上调过） | 39.94 | 18.69 | 35.50 |
+| CAM 论文（1000 / 1000 / 1500 epoch） | 44.16 | 19.91 | 41.25 |
+| KaMIS（RB 两列转引自别的论文，test 集不同） | 44.87 | 20.10 | 43.15 |
+
+三个数据集上 CAMPrior 都是早期学得快得多（ER 第 1 个 epoch、RB-small 第 5 个 epoch、RB-large 第 20 个 epoch），最终 best.pt 略高，都在 CAM 论文同一水平。都只有 1 个种子。
 
 ### 2.7 补种子、消融和蒸馏热启动（sa 集群，截至 11-10 17:30 UTC）
 
@@ -453,7 +460,7 @@ RB-large（11-11 训完；同预算 RLSA 35.50，CAM 论文 1500 epoch 41.25，K
    - 风险：RLSA 要用全图第 20 大的 δ，而 CAM 的网络只在邻居间传消息，链的最后几步 logit 又放大到约 50 倍，所以蒸馏可能达不到 RLSA 的水平。另外只在 RLSA 走过的状态上学，有分布偏移；如果偏差大，可改为在网络自己走到的状态上用 RLSA 打标签，但这算换方案，要先问。
 4. **训练标签消融**（11-10 决定，论文的关键消融）：模拟标签和对照两组在跑，见 §2.8，约 11-12 晚训完；一阶标签不跑。训完后和 `CAMPrior_p1_e100_s0` 用同样的评测（test、大图）比较。
 5. **查 CAMPrior τ0=0.01 大图泛化崩掉的原因**。
-6. **其他数据集**：RB-small、RB-large 已于 11-08 晚启动，见 §2.6。之后可以考虑 MaxCut（RLSA 原论文也覆盖 BA 图上的 MaxCut）。
+6. **其他数据集**：RB-small、RB-large 种子 0 已完成，见 §2.6；还没补种子（原集群现在有 6 张卡空着，可以跑）。MaxCut 在 sa 集群上跑，见 §2.9。
 7. **连续臂**：根据另一集群的小试结果，定训练步数、裁剪和能量，重跑 AS/ASBS 两臂。
 
 ## 5. 未决问题
