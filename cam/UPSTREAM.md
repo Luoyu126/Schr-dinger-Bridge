@@ -101,6 +101,21 @@ shows only the items below).
 25. Added `scripts/mcut/mcut_ba_large_local.sh`: MaxCut BA-[800-1200] from a local copy of the HF
     `MCut.zip` (`$CAM_MCUT_DIR`), hyperparameters of `scripts/mcut/mcut_ba_large_cam.sh`, the
     runner conventions of `scripts/mis/mis_er700_cam.sh` (one launch per GPU set, `MODE=test`).
+26. Added `envs/mcl.py` and `datasets/mcl.py` (`--problem mcl`, maximum clique; `main.py` already
+    listed the choice but upstream ships no env for it). As in RLSA (Feng & Yang, 2025, eq. 19) the
+    energy is the MIS penalty energy of the complement graph, computed without building it:
+    A_c x = (graph sum of x - x)/2 - A x with the dataset's 1/2 edge weights. The model still
+    passes messages on the original graph. The continuous decoder is a greedy clique by
+    probability; the discrete one is the same local search as `envs/mis.py`. `datasets/mcl.py`
+    reuses the MIS loader (same RB graphs). `solvers/cam_prior.py` refuses `--label_mode sim|lin`
+    for problems other than MIS (both rebuild the MIS energy from the edge list).
+27. Added `tests/test_mcl.py` (`$CAM_PYTHON cam/tests/test_mcl.py`; `MCL_TEST_RB=<dir>` adds real
+    RB graphs): energy and gradient against `envs/mis.py` on the explicit complement, decoders
+    return maximal cliques, RLSA finds a planted clique.
+28. `scripts/mis/mis_rb_cam.sh`, `rb_runs.sh`, `rb_curve.sh` take `PROBLEM=mis|mcl` (default mis,
+    unchanged); with `mcl` runs go to `runs/cam/mcl_rb_<scale>/`. Added
+    `scripts/mis/rb_rlsa_sweep.sh`: RLSA over a (tau0, d) grid on the first 64 validation graphs
+    with CAM's budget, several GPUs, to choose the prior and the same-budget RLSA baseline.
 
 `scripts/config.sh` and the other upstream scripts are unchanged and not used by our runner.
 `CAMPrior` runs through the same runner by appending flags, e.g.
