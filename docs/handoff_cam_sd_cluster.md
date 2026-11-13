@@ -180,7 +180,7 @@
 cd /usr0/home/shengyuf/yunyi/Schr-dinger-Bridge
 git pull origin mis-asbs-energy-base
 source cam/scripts/env.sh
-$CAM_PYTHON cam/tests/test_mcl.py                                   # 应为 4/5 passed + test_5 skipped
+$CAM_PYTHON cam/tests/test_mcl.py                                   # 5/5 passed（test_5 显示 skipped）
 MCL_TEST_RB=/data/shengyuf/MIS/RB_small_valid $CAM_PYTHON cam/tests/test_mcl.py   # 5/5
 $CAM_PYTHON cam/tests/test_cam_prior.py                             # 6/6，确认原来的路径没坏
 ```
