@@ -561,6 +561,39 @@ def test_6_dense_labels():
     return '; '.join(out)
 
 
+
+def test_7_nosign_labels():
+    """--label_mode nosign: CAM's target times (1 - 2 p), p = node flips an odd number of times after
+    step t; same rollout as CAM (identical states, time, prior columns)."""
+    with TmpDir() as tmp:
+        data = write_dataset(os.path.join(tmp, 'g'), [26, 19], 0.25, seed=13)
+        graph = load_batch(data, [0, 1])
+        T, K = 6, 4
+
+        def gen(**over):
+            torch.manual_seed(5)
+            solver = build(CAMPrior, data, residual_init='default', **over)
+            torch.manual_seed(9)
+            return solver, solver.generate_data(graph)
+
+        _, ref = gen()
+        solver, ns = gen(label_mode='nosign')
+        X = torch.stack([ns[i][0] for i in range(T*K)]).reshape(K, T, -1)            # chain, step, node
+        for a, b in zip(ref, ns):
+            for c in (0, 1, 2, 4):
+                assert torch.equal(a[c], b[c]), c
+        # the state after the last step is not stored; p only needs X_{t+1} for t < T - 1
+        n_odd, err = 0, 0.0
+        for k in range(K):
+            for t in range(T):
+                cam_t, ns_t = ref[k*T + t][3], ns[k*T + t][3]
+                odd = (X[k, T - 1] != X[k, t + 1]).float() if t < T - 1 else torch.zeros_like(cam_t)
+                n_odd += int(odd.sum())
+                err = max(err, (ns_t - cam_t*(1 - 2*odd)).abs().max().item())
+        assert err < 1e-6 and n_odd > 0, (err, n_odd)
+    return f'nosign == CAM * (1 - 2p) ({n_odd} sign flips, max err {err:.1e})'
+
+
 # ---------------------------------------------------------------- runner
 if __name__ == '__main__':
     tests = [(k, v) for k, v in list(globals().items()) if k.startswith('test_') and callable(v)]
