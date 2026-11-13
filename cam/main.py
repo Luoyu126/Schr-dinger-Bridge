@@ -24,7 +24,7 @@ def main():
     parser.add_argument("--valid_samples", type=int, default=-1)   
     parser.add_argument("--test_path", type=str, default='./')
     parser.add_argument("--test_samples", type=int, default=-1)  
-    parser.add_argument("--problem", type=str, default='mis', choices=['mis', 'mcl', 'mcut', 'tsp', 'cvrp'])
+    parser.add_argument("--problem", type=str, default='mis', choices=['mis', 'mcl', 'mcut', 'mds', 'tsp', 'cvrp'])
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--save_dir", type=str, default='./')
     parser.add_argument("--log_file", type=str, default='log.txt')
