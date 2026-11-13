@@ -23,10 +23,13 @@ label needs many rollouts to carry signal.
           E2 healing: Hamming distance of CRN pairs after the perturbation;
           E3 correlation of K-rollout simulated labels with exact, K = 1 .. 256 (RLSA reference).
   large   ER-[700-800] test graphs, RLSA prior of the main runs (d = 20, tau0 = 1 linear): E2 healing
-          and the shortcut against the CRN pair label, at several steps and two temperatures.
+          and the shortcut against the CRN pair label, at several steps and two temperatures;
+          --checkpoint replaces the reference by a trained CAMPrior policy (prior + residual).
 
     $CAM_PYTHON cam/scripts/mis/d3_label_theory.py small --out runs/d3_label_theory/small
     CUDA_VISIBLE_DEVICES=2 $CAM_PYTHON cam/scripts/mis/d3_label_theory.py large --out runs/d3_label_theory/large
+    CUDA_VISIBLE_DEVICES=2 $CAM_PYTHON cam/scripts/mis/d3_label_theory.py large --out runs/d3_label_theory/h3/ep0050 \
+        --checkpoint runs/cam/mis_er700/CAMPrior_p1_e100_s1/epoch_0050.pt --fp32
 Writes <out>/report.json and <out>/log.txt; results in docs/label_correction.md section 6.
 """
 import argparse
@@ -269,6 +272,19 @@ def large(args, log):
         raise SystemExit(f'no gpickles in {args.data}')
     T, d, beta = args.T, args.d, args.beta
     report = dict(args=vars(args), runs=[])
+    model = None
+    if args.checkpoint:
+        # trained CAMPrior policy = RLSA prior at the checkpoint's tau ratio + network residual
+        from models import EncodeProcessDecode
+        model = EncodeProcessDecode(hidden_dim=args.num_h, n_layers=args.num_l, out_channels=1, problem='mis')
+        model.load_state_dict(torch.load(args.checkpoint, weights_only=True, map_location='cpu'))
+        model = model.to(dev).eval()
+        with open(args.checkpoint + '.prior.json') as fh:
+            meta = json.load(fh)
+        assert meta['prior_d'] == d and meta['beta'] == beta and meta['prior_tau0'] == args.prior_tau0, meta
+        args.ratios = str(meta['tau_ratio'])
+        report['checkpoint_meta'] = meta
+        log(f'checkpoint {args.checkpoint}: tau ratio {meta["tau_ratio"]}')
     for gi, fn in enumerate(files):
         import pickle
         with open(fn, 'rb') as fh:
@@ -281,13 +297,26 @@ def large(args, log):
         # envs/mis.py: edge weight 1/2 per directed edge, grad = 2 beta (A/2) x + b
         Ah = A/2
 
+        if model is not None:                                 # same node order as datasets/mis.py
+            from torch_geometric.data import Batch
+            from torch_geometric.utils import from_networkx, remove_self_loops, to_undirected
+            data = from_networkx(G)
+            ei = remove_self_loops(to_undirected(data.edge_index))[0]
+            assert torch.equal(torch.sparse_coo_tensor(ei, torch.ones(ei.shape[1]), (n, n)).to_dense().to(dev).to(dt), A)
+            pyg = Batch.from_data_list([type(data)(edge_index=ei, num_nodes=n)]).to(dev)
+
+        def residual(x):
+            out = [model(pyg, c.float().unsqueeze(-1)).squeeze(-1).to(dt) for c in x.split(args.chunk, 1)]
+            return torch.cat(out, 1)
+
         def logits(x, j, temps):
             if args.ref == 'uniform':                         # sanity check of claim 1 at scale
                 return torch.full_like(x, float(np.log(d/n) - np.log(1 - d/n)))
             grad = 2*beta*(Ah@x) + b
             delta = grad*(2*x - 1)/2
             thr = -torch.kthvalue(-delta, min(d, n), dim=0, keepdim=True).values
-            return (delta - thr)/temps[j]
+            out = (delta - thr)/temps[j]
+            return out if model is None else out + residual(x)
 
         def energy(x):
             return (x*(beta*(Ah@x) + b)).sum(0)
@@ -411,11 +440,17 @@ def main():
     l.add_argument('--ref', default='rlsa', choices=['rlsa', 'uniform'])
     l.add_argument('--lams', default='0,0.5,0.8,0.9,0.97,1', help='dense labels compared with the CRN truth')
     l.add_argument('--fp32', action='store_true')
+    l.add_argument('--checkpoint', default='', help='CAMPrior checkpoint (EncodeProcessDecode); the policy is '
+                   'then prior + residual, at the tau ratio of its .prior.json (overrides --ratios)')
+    l.add_argument('--num_h', type=int, default=64)
+    l.add_argument('--num_l', type=int, default=8)
+    l.add_argument('--chunk', type=int, default=1024, help='columns per network call')
     a = ap.parse_args()
     torch.set_num_threads(8)
     log = Logger(a.out)
     log(f'args {vars(a)}')
-    report = small(a, log) if a.cmd == 'small' else large(a, log)
+    with torch.no_grad():
+        report = small(a, log) if a.cmd == 'small' else large(a, log)
     with open(os.path.join(a.out, 'report.json'), 'w') as f:
         json.dump(report, f, indent=1)
     log('done')
