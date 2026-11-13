@@ -10,6 +10,8 @@
 # Groups (the run name carries every flag that differs, so the evaluation scripts can rebuild them):
 #   CAM_tau0.1                 --tau0 0.1
 #   CAMPrior_p<T>_d<D>         --method CAMPrior --prior_tau0 <T> --prior_d <D>
+#   <group>_reg<L>_D<N>        the same plus CAM App. C.1's update-magnitude penalty
+#                              --lambd <L> --num_d <N> (L * (expected flips per step - N)^2; training only)
 #
 #   GPUS="4 5 6 7" SCALES="small large" RUN_GROUPS="CAM_tau0.1 CAMPrior_p1_d5" DRY=1 bash cam/scripts/mis/rb_runs.sh
 #
@@ -24,6 +26,15 @@ LOGDIR=runs/queue_cam_rb; mkdir -p "$LOGDIR"
 
 epochs_of() { case "$1" in small) echo "${EPOCHS_SMALL:-100}" ;; large) echo "${EPOCHS_LARGE:-150}" ;; esac; }
 flags_of() {   # group name -> main.py flags
+    local g=$1 reg=""
+    if [[ "$g" =~ ^(.+)_reg([0-9.]+)_D([0-9]+)$ ]]; then
+        g=${BASH_REMATCH[1]}; reg=" --lambd ${BASH_REMATCH[2]} --num_d ${BASH_REMATCH[3]}"
+    fi
+    local base
+    base=$(base_flags_of "$g") || return 1
+    echo "$base$reg"
+}
+base_flags_of() {
     local g=$1
     if [ "$g" = CAM_tau0.1 ]; then echo "--tau0 0.1"
     elif [[ "$g" =~ ^CAMPrior_p([0-9.]+)_d([0-9]+)$ ]]; then

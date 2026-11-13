@@ -46,6 +46,7 @@ while :; do
       PROBLEM=$PROBLEM xargs -P "$PAR" -I{} bash -c '
         IFS="|" read -r x k ck log <<< "{}"
         g=${x%_e*_s*}
+        [[ "$g" =~ ^(.+)_reg[0-9.]+_D[0-9]+$ ]] && g=${BASH_REMATCH[1]}   # the penalty only affects training
         if [ "$g" = CAM_tau0.1 ]; then extra="--tau0 0.1"
         elif [[ "$g" =~ ^CAMPrior_p([0-9.]+)_d([0-9]+)$ ]]; then
             extra="--method CAMPrior --prior_tau0 ${BASH_REMATCH[1]} --prior_d ${BASH_REMATCH[2]}"
