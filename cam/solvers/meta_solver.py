@@ -303,11 +303,22 @@ class ULSolver(NNSolver):
         wait = 0
         self.accelerator.wait_for_everyone()
         # Local patch (see UPSTREAM.md): with --save_every_epoch also keep the untrained weights.
-        if getattr(getattr(self, 'args', None), 'save_every_epoch', False):
+        start = int(getattr(getattr(self, 'args', None), 'start_epoch', 0) or 0)
+        if getattr(getattr(self, 'args', None), 'save_every_epoch', False) and start == 0:
             self.tau = self.temp_scheduler(0)
             self.save_ckpt(os.path.join(save_dir, 'epoch_init.pt'))
+        if start > 0:
+            # Local patch (see UPSTREAM.md): --start_epoch continues a run; advance the step-based
+            # learning-rate schedule by the optimizer steps of the skipped epochs.
+            skipped = int(round(self.num_steps()*start/self.epochs))
+            for _ in range(skipped):
+                self.scheduler.step()
+            self.global_step = skipped
+            self.accelerator.print(f'start_epoch {start}: lr schedule advanced {skipped} steps, '
+                                   f'lr {self.scheduler.get_last_lr()[0]:.3g}, tau {self.temp_scheduler(start):.4g}')
 
-        for epoch in range(self.epochs):
+        stop = getattr(getattr(self, 'args', None), 'stop_epoch', None)
+        for epoch in range(start, self.epochs if stop is None else min(int(stop), self.epochs)):
             sample_loader = iter(cycle(self.train_loader))
             self.model.train()
             self.tau = self.temp_scheduler(epoch)

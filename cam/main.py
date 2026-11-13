@@ -73,6 +73,13 @@ def main():
     parser.add_argument("--lr", type=float, default=0.0001)
     parser.add_argument("--weight_decay", type=float, default=0.0001)
     parser.add_argument("--patience", type=int, default=20)
+    parser.add_argument("--start_epoch", type=int, default=0,
+                        help="local addition (see UPSTREAM.md): continue a run from this epoch; with "
+                             "--checkpoint epoch_<start_epoch-1>.pt the temperature and learning-rate "
+                             "schedules resume where the run left them (optimizer moments start fresh)")
+    parser.add_argument("--stop_epoch", type=int, default=None,
+                        help="local addition (see UPSTREAM.md): stop after this many epochs while the "
+                             "schedules still run over --epochs (for continuations)")
     parser.add_argument("--save_every_epoch", action="store_true",
                         help="local addition (see UPSTREAM.md): also save epoch_XXXX.pt every epoch")
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
