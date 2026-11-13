@@ -10,6 +10,7 @@
 #   SCALE=small DEVICE=gpu GPU=4 PAR=2 EXPS="CAM_tau0.1_e100_s0 CAMPrior_p1_d5_e100_s0" \
 #     nohup bash cam/scripts/mis/rb_curve.sh > runs/cam/mis_rb_small_test/queue.log 2>&1 &
 #   SCALE=large DEVICE=cpu THR=4 PAR=2 KS="0 1 2 5 10" EXPS=... nohup bash cam/scripts/mis/rb_curve.sh ...
+# PROBLEM=mcl evaluates the maximum-clique runs (runs/cam/mcl_rb_<scale>/, output runs/cam/mcl_rb_<scale>_test).
 # Env: KS (epochs; default 0 1 2 5 10 20 ... LAST), BEST (1: also best.pt), LAST (default 100 small,
 # 150 large), TEST_SAMPLES (default all; >0 only for dry runs), OUT (default runs/cam/mis_rb_<scale>_test).
 set -uo pipefail
@@ -18,8 +19,8 @@ SCALE="${SCALE:?SCALE=small|large}"; DEVICE="${DEVICE:-gpu}"; PAR="${PAR:-2}"; T
 case "$SCALE" in small) LAST="${LAST:-100}" ;; large) LAST="${LAST:-150}" ;; *) echo "bad SCALE" >&2; exit 1 ;; esac
 case "$DEVICE" in gpu) GPU="${GPU:?set GPU}" ;; cpu) GPU="" ;; *) echo "DEVICE must be gpu or cpu" >&2; exit 1 ;; esac
 EXPS=(${EXPS:?set EXPS}); KS=(${KS:-0 1 2 5 $(seq -s ' ' 10 10 "$LAST")}); BEST="${BEST:-1}"
-TEST_SAMPLES="${TEST_SAMPLES:--1}"; WAIT="${WAIT:-600}"
-RUNS="${RUNS:-runs/cam/mis_rb_$SCALE}"; OUT="${OUT:-runs/cam/mis_rb_${SCALE}_test}"
+TEST_SAMPLES="${TEST_SAMPLES:--1}"; WAIT="${WAIT:-600}"; PROBLEM="${PROBLEM:-mis}"
+RUNS="${RUNS:-runs/cam/${PROBLEM}_rb_$SCALE}"; OUT="${OUT:-runs/cam/${PROBLEM}_rb_${SCALE}_test}"
 mkdir -p "$OUT"
 declare -A FAILS=()
 points=("${KS[@]}"); [ "$BEST" = 1 ] && points+=(best)
@@ -42,7 +43,7 @@ while :; do
     [ $((done_n + gave_up)) -ge "$total" ] && break
     if [ ${#todo[@]} -eq 0 ]; then sleep "$WAIT"; continue; fi
     results=$(printf '%s\n' "${todo[@]}" | SCALE=$SCALE DEVICE=$DEVICE GPU=$GPU THR=$THR TEST_SAMPLES=$TEST_SAMPLES \
-      xargs -P "$PAR" -I{} bash -c '
+      PROBLEM=$PROBLEM xargs -P "$PAR" -I{} bash -c '
         IFS="|" read -r x k ck log <<< "{}"
         g=${x%_e*_s*}
         if [ "$g" = CAM_tau0.1 ]; then extra="--tau0 0.1"
@@ -51,7 +52,7 @@ while :; do
         else echo "FAIL|$x|$k|unknown group $g"; exit 0; fi
         mkdir -p "$(dirname "$log")"
         if CUDA_VISIBLE_DEVICES=$GPU OMP_NUM_THREADS=$THR MKL_NUM_THREADS=$THR \
-             PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True MODE=test PROJECT=mis_rb_${SCALE}_eval EXP=$x \
+             PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True PROBLEM=$PROBLEM MODE=test PROJECT=${PROBLEM}_rb_${SCALE}_eval EXP=$x \
              bash cam/scripts/mis/mis_rb_cam.sh $extra --checkpoint "$PWD/$ck" --test_path "${CAM_RB_DIR:-/data/shengyuf/MIS}/RB_${SCALE}_test" \
              --test_samples $TEST_SAMPLES --log_file "$PWD/$log" > "$log.out" 2>&1 && [ -f "$log.per_graph.csv" ]; then
             echo "OK|$x|$k|$(head -1 "$log")"

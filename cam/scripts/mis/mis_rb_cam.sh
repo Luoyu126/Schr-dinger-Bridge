@@ -8,6 +8,8 @@
 #   SCALE=small CUDA_VISIBLE_DEVICES=4 PROJECT=p EXP=e bash cam/scripts/mis/mis_rb_cam.sh [extra args]
 #   MODE=test ...                                      (evaluate best.pt or --checkpoint X.pt)
 #   MODE=test DEVICE=cpu ...                           (evaluate on CPU, OMP_NUM_THREADS threads)
+#   PROBLEM=mcl ...                                    (maximum clique on the same RB graphs, envs/mcl.py;
+#                                                       same hyperparameters, default PROJECT mcl_rb_<scale>)
 # The number of processes is the number of GPUs in CUDA_VISIBLE_DEVICES: name exactly one GPU per
 # run, since more GPUs means data parallel training with a larger batch (a different protocol).
 set -euo pipefail
@@ -15,7 +17,9 @@ source "$(dirname "${BASH_SOURCE[0]}")/../env.sh"
 
 export PRECISION=no
 SCALE="${SCALE:?set SCALE=small or SCALE=large}"
-export PROJECT="${PROJECT:-mis_rb_$SCALE}"
+PROBLEM="${PROBLEM:-mis}"
+case "$PROBLEM" in mis|mcl) ;; *) echo "error: PROBLEM must be mis or mcl" >&2; exit 1 ;; esac
+export PROJECT="${PROJECT:-${PROBLEM}_rb_$SCALE}"
 export EXP="${EXP:-cam}"
 MODE="${MODE:-train}"
 DATA="${CAM_RB_DIR:-/data/shengyuf/MIS}"
@@ -50,7 +54,7 @@ nice -n 10 "$CAM_ACCELERATE" launch --mixed_precision=$PRECISION \
     --train_path "$DATA/RB_${SCALE}_train" \
     --valid_path "$DATA/RB_${SCALE}_valid" \
     --test_path "$DATA/RB_${SCALE}_test" \
-    --problem mis \
+    --problem "$PROBLEM" \
     --valid_sample 64 \
     --num_t 50 \
     --num_k 20 \

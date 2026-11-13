@@ -3,8 +3,9 @@
 # protocol of the ER-[700-800] runs: one GPU per run, 1/10 of the official epochs (RB-small 100,
 # RB-large 150) with the temperature annealing and the cosine schedule over the shortened run,
 # validation and a checkpoint every epoch, official hyperparameters otherwise (mis_rb_cam.sh).
-# One run per GPU, detached; the training log goes to runs/queue_cam_rb/mis_rb_<scale>__<exp>.log,
-# checkpoints to runs/cam/mis_rb_<scale>/<exp>/.
+# One run per GPU, detached; the training log goes to runs/queue_cam_rb/<problem>_rb_<scale>__<exp>.log,
+# checkpoints to runs/cam/<problem>_rb_<scale>/<exp>/. PROBLEM=mis (default) or mcl (maximum clique
+# on the same graphs, envs/mcl.py).
 #
 # Groups (the run name carries every flag that differs, so the evaluation scripts can rebuild them):
 #   CAM_tau0.1                 --tau0 0.1
@@ -18,6 +19,7 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../../.."
 SCALES=(${SCALES:-small large}); GROUPS_=(${RUN_GROUPS:?set RUN_GROUPS, e.g. RUN_GROUPS=\"CAM_tau0.1 CAMPrior_p1_d5\"})
 SEEDS=(${SEEDS:-0}); GPUS=(${GPUS:?set GPUS, e.g. GPUS=\"4 5 6 7\"}); DRY="${DRY:-0}"
+PROBLEM="${PROBLEM:-mis}"
 LOGDIR=runs/queue_cam_rb; mkdir -p "$LOGDIR"
 
 epochs_of() { case "$1" in small) echo "${EPOCHS_SMALL:-100}" ;; large) echo "${EPOCHS_LARGE:-150}" ;; esac; }
@@ -40,15 +42,15 @@ fi
 for j in "${jobs[@]}"; do
     IFS="|" read -r sc g s <<< "$j"
     exp="${g}_e$(epochs_of "$sc")_s${s}"
-    if [ -e "runs/cam/mis_rb_$sc/$exp" ]; then echo "error: runs/cam/mis_rb_$sc/$exp exists" >&2; exit 1; fi
+    if [ -e "runs/cam/${PROBLEM}_rb_$sc/$exp" ]; then echo "error: runs/cam/${PROBLEM}_rb_$sc/$exp exists" >&2; exit 1; fi
 done
 
 i=0
 for j in "${jobs[@]}"; do
     IFS="|" read -r sc g s <<< "$j"
     e=$(epochs_of "$sc"); exp="${g}_e${e}_s${s}"; gpu="${GPUS[$i]}"; i=$((i + 1))
-    log="$LOGDIR/mis_rb_${sc}__$exp.log"
-    cmd="CUDA_VISIBLE_DEVICES=$gpu PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True SCALE=$sc PROJECT=mis_rb_$sc EXP=$exp bash cam/scripts/mis/mis_rb_cam.sh --epochs $e --N_anneal $e --save_every_epoch --seed $s $(flags_of "$g")"
+    log="$LOGDIR/${PROBLEM}_rb_${sc}__$exp.log"
+    cmd="CUDA_VISIBLE_DEVICES=$gpu PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True PROBLEM=$PROBLEM SCALE=$sc PROJECT=${PROBLEM}_rb_$sc EXP=$exp bash cam/scripts/mis/mis_rb_cam.sh --epochs $e --N_anneal $e --save_every_epoch --seed $s $(flags_of "$g")"
     echo "GPU $gpu  RB-$sc  $exp"
     echo "    $cmd"
     if [ "$DRY" != 1 ]; then
