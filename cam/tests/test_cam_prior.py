@@ -594,6 +594,75 @@ def test_7_nosign_labels():
     return f'nosign == CAM * (1 - 2p) ({n_odd} sign flips, max err {err:.1e})'
 
 
+def test_8_simpol_labels():
+    """--label_mode simpol: (a) with a zero residual and no KL it equals the sim label (RLSA
+    rollouts, same uniforms); (b) with a random residual each label equals a direct rollout of the
+    current sampler from the factual and the toggled next state, with the same uniforms, including
+    the tau * KL cost along the rollout."""
+    from solvers.sim_labels import item_uniforms
+    from solvers.cam_prior import bernoulli_kl_logits
+    out = []
+    with TmpDir() as tmp:
+        data = write_dataset(os.path.join(tmp, 'g'), [23], 0.25, seed=13)
+        graph = load_batch(data, [0])
+        T, K = 6, 4
+
+        def gen(**over):
+            torch.manual_seed(5)
+            solver = build(CAMPrior, data, label_frac=0.2, **over)
+            solver.tau = solver.temp_scheduler(0)
+            torch.manual_seed(9)
+            return solver, solver.generate_data(graph)
+
+        _, sim = gen(label_mode='sim')
+        _, pol = gen(label_mode='simpol', simpol_kl='off')
+        err = max((a[3] - b[3]).abs().max().item() for a, b in zip(sim, pol))
+        nz = sum(int((b[3] != 0).sum()) for b in pol)
+        assert err < 1e-5 and nz > 0, (err, nz)
+        out.append(f'zero residual == sim ({nz} labels, max err {err:.1e})')
+
+        # --label_states: the labelled states keep exactly the labels of the full run
+        _, full = gen(label_mode='simpol')
+        _, part = gen(label_mode='simpol', label_states=0.25)
+        kept = [i for i, b in enumerate(part) if b[5].sum() > 0]
+        assert len(kept) == round(0.25*T*K), len(kept)
+        for i, (a, b) in enumerate(zip(full, part)):
+            if i in kept:
+                assert torch.equal(a[3], b[3]) and torch.equal(a[5], b[5]), i
+            else:
+                assert b[3].abs().sum() == 0 and b[5].sum() == 0, i
+        out.append(f'label_states 0.25: {len(kept)} states keep the full-run labels')
+
+        torch.manual_seed(3)
+        solver = build(CAMPrior, data, residual_init='default', label_mode='simpol')
+        solver.tau = 0.07
+        n = graph.num_nodes
+        gen_ = torch.Generator().manual_seed(1)
+        C, m = 3, 2
+        x_next = torch.randint(0, 2, (n, C), generator=gen_).float()
+        sel = torch.stack([torch.randperm(n, generator=gen_)[:m] for _ in range(C)])
+        sign = torch.tensor([[1., -1.], [-1., 1.], [1., 1.]])
+        starts, seeds, ratio = [4, 2, T], [11, 22, 33], 0.8
+        got = solver.policy_cf_labels(graph, x_next, sel, sign, starts, seeds, ratio)
+        err = 0.0
+        for c in range(C):
+            U = item_uniforms(torch.tensor([seeds[c]]), torch.tensor([starts[c]]), T, n)[0]
+            X = x_next[:, c:c + 1].repeat(1, m + 1)
+            for i in range(m):
+                X[sel[c, i], i + 1] = 1 - X[sel[c, i], i + 1]
+            kl = torch.zeros(m + 1)
+            for j in range(starts[c], T):
+                logits, prior = solver.flip_logits(graph, X, torch.ones_like(X)*j/T, j, ratio)
+                kl += 0.07*bernoulli_kl_logits(logits, prior).sum(0)
+                X = torch.where(U[j].unsqueeze(1) < torch.sigmoid(logits), 1 - X, X)
+            cost = solver.problem.energy_func(graph, X, False)[0].reshape(-1) + kl
+            expect = sign[c]*(cost[0] - cost[1:])
+            err = max(err, (got[c] - expect).abs().max().item())
+        assert err < 1e-4, err
+        out.append(f'random residual == direct rollout incl. KL (max err {err:.1e})')
+    return '; '.join(out)
+
+
 # ---------------------------------------------------------------- runner
 if __name__ == '__main__':
     tests = [(k, v) for k, v in list(globals().items()) if k.startswith('test_') and callable(v)]
