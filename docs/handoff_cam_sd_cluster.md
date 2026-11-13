@@ -26,7 +26,7 @@
 | 0、1 | 别的用户（yixinhu2） | 不能用 |
 | 2–7 | 空着 | RB-large 训练已于 11-11 15:30 结束，评测 16:15 全部完成 |
 
-本集群上所有训练和评测都已结束，没有我们的任务在跑。
+本集群上所有训练和评测都已结束，没有我们的任务在跑。**下一件事是最大团（第 8 节，用户 11-12 已批准），按第 8 节的命令执行。**
 
 ## 2. 本集群环境
 
@@ -157,3 +157,92 @@
    - RB 两个规模补种子 1、2（8 个任务；RB-small 约 1.4 天，RB-large 约 3 天）。
    - 曲线网页加上 RB 和 sa 集群的种子曲线。
 3. 论文大纲文档（https://claude.ai/artifact/RNCKAHkLcgJGsb9UJTAvSo ）按用户要求暂停，只写了第一节；相关工作定位要等文献调研的分工定下来再写。
+
+## 8. 新任务：最大团（Maximum Clique，MCl），RB-[200-300] 和 RB-[800-1200]（11-13 写）
+
+**为什么做**：RLSA 论文（arXiv 2502.00277，表 2）在 MIS 之外还比了最大团和 MaxCut。MaxCut 已在 sa 上做完；用户 11-12 要求把最大团也跑了，完全对上 RLSA 的设定。CAM 论文没做最大团，所以这一项只和 RLSA 论文比：RLSA 18.97 / 40.53，iSCO 18.96 / 40.35，RLNN 18.13 / 35.23，DiffUCO 16.22（只有小图），Gurobi 19.05（只有小图）。
+
+**卡怎么分（用户定的）**：先用 2–7 号六张卡快速扫参，扫完后 4 张卡训练、1 张卡评测、1 张卡空着。0、1 号卡是别的用户的，不碰。
+
+### 8.1 代码（已在 sa 上写好、测过、推送，提交 8bb9d81..3a91652）
+
+- `cam/envs/mcl.py`：最大团 = 补图上的 MIS（RLSA 论文式 19），能量 −Σxᵢ + β·#(选中但不相邻的点对)。补图不显式建（RB-large 补图有约 47 万条边），用 A_c·x = (同图 x 之和 − x)/2 − A·x 隐式算，A 沿用数据集的 1/2 边权。**GNN 仍在原图上传消息**，只有能量和梯度用补图。解码：连续解码按概率贪心建团，离散解码同 MIS 的局部搜索。
+- `cam/datasets/mcl.py`：直接复用 MIS 的读图（同一批 RB 图；RLSA 论文 MIS 和最大团用的也是同一套 RB 数据）。
+- `cam/tests/test_mcl.py`：5 个测试，和显式补图上的 MIS 能量、梯度逐项对比（误差 1e-6），解码结果都是极大团，RLSA 能找到植入的 8-团。
+- `mis_rb_cam.sh`、`rb_runs.sh`、`rb_curve.sh` 加了 `PROBLEM=mcl`（默认还是 mis，原来的命令不变）；最大团的结果目录是 `runs/cam/mcl_rb_<规模>/`。
+- 新增 `cam/scripts/mis/rb_rlsa_sweep.sh`：多卡并行在 64 张 validation 图上扫 RLSA 的 (τ0, d)，预算同 CAM（50 步 × 20 条链）。
+- sa 上冒烟测试都通过：扫参（8 张图，约 10 秒一个点），两个规模的 CAM / CAMPrior 各训 1 个 epoch，`rb_curve.sh` 评测（含 CAMPrior 读回先验设置）。
+- 注意：`--label_mode sim|lin`（标签消融）只支持 MIS，对最大团会直接报错。
+
+### 8.2 第一步：拉代码、跑测试
+
+```bash
+cd /usr0/home/shengyuf/yunyi/Schr-dinger-Bridge
+git pull origin mis-asbs-energy-base
+source cam/scripts/env.sh
+$CAM_PYTHON cam/tests/test_mcl.py                                   # 应为 4/5 passed + test_5 skipped
+MCL_TEST_RB=/data/shengyuf/MIS/RB_small_valid $CAM_PYTHON cam/tests/test_mcl.py   # 5/5
+$CAM_PYTHON cam/tests/test_cam_prior.py                             # 6/6，确认原来的路径没坏
+```
+
+### 8.3 第二步：六张卡扫参（预计 15–30 分钟）
+
+```bash
+mkdir -p runs/queue_cam_rb
+PROBLEM=mcl GPUS="2 3 4 5 6 7" PAR=2 SCALES="small large" TAUS="0.1 1 4 10" DS="2 5 10 20 50" \
+  nohup bash cam/scripts/mis/rb_rlsa_sweep.sh > runs/queue_cam_rb/mcl_rlsa_sweep.log 2>&1 &
+```
+
+两个规模各 20 个点，共 40 个；结果在 `runs/cam/mcl_rb_<规模>_rlsa_sweep/t<τ0>_d<d>/`，日志末尾按分数排好序。
+
+**怎么选（和 MIS、MaxCut 的口径一致）**：
+- CAMPrior 的先验温度固定 τ0 = 1（ER、RB、MaxCut 都是 1），**d 取 τ0 = 1 那一行 validation 最好的**。只有当 τ0 = 1 的最好值比整个网格的最好值低 0.3 以上时，才改用整个网格最好的 (τ0, d)，并在汇报里写明。
+- 同预算 RLSA 基线用整个网格 validation 最好的 (τ0, d)。
+- 同分时取更小的 d（更接近 RLSA 论文最大团的 d = 2）。
+- 参考：sa 上 8 张图的冒烟结果，RB-small τ0=4,d=2 19.13、τ0=1,d=2/20 18.50；RB-large τ0=4,d=20 41.38、τ0=1,d=20 41.25、τ0=1,d=2 30.50。大图上 d=2 明显差（和 MIS RB-large 上 d=5 差的现象一样），只有 8 张图，以 64 张图为准。
+
+### 8.4 第三步：四张卡训练（2–5 号卡）
+
+协议同 MIS 的 RB：单卡、种子 0、RB-small 100 个 epoch、RB-large 150 个 epoch（官方 epoch 的 1/10，退火和余弦学习率按缩短后的长度走完），每个 epoch 存 checkpoint，其余超参照搬 MIS 的 RB 脚本，β = 1.02（RLSA 论文最大团也是 1.02）。把下面的 `<dS>`、`<dL>` 换成上一步选出的 d（如果 τ0 不是 1，组名里的 `p1` 也换掉）：
+
+```bash
+PROBLEM=mcl GPUS="2 3" SCALES=small RUN_GROUPS="CAM_tau0.1 CAMPrior_p1_d<dS>" DRY=1 bash cam/scripts/mis/rb_runs.sh   # 先看命令
+PROBLEM=mcl GPUS="2 3" SCALES=small RUN_GROUPS="CAM_tau0.1 CAMPrior_p1_d<dS>" bash cam/scripts/mis/rb_runs.sh
+PROBLEM=mcl GPUS="4 5" SCALES=large RUN_GROUPS="CAM_tau0.1 CAMPrior_p1_d<dL>" bash cam/scripts/mis/rb_runs.sh
+```
+
+训练日志 `runs/queue_cam_rb/mcl_rb_<规模>__<实验名>.log`，checkpoint `runs/cam/mcl_rb_<规模>/<实验名>/`。MIS 上 RB-small 约 20 分钟一个 epoch（约 1.4 天），RB-large 约 29 分钟一个 epoch（约 3 天），最大团的能量多一次散射求和，时间应差不多；启动后看第一个 epoch 的实际时间并汇报。
+
+### 8.5 第四步：一张卡评测（6 号卡），7 号卡空着
+
+test 曲线（1000 张 test 图，50 步 × 20 条链，第 0、1、2、5、10、20…个 epoch 加 best.pt），两个规模各一条队列，都在 6 号卡上：
+
+```bash
+mkdir -p runs/cam/mcl_rb_small_test runs/cam/mcl_rb_large_test
+PROBLEM=mcl SCALE=small DEVICE=gpu GPU=6 PAR=1 EXPS="CAM_tau0.1_e100_s0 CAMPrior_p1_d<dS>_e100_s0" \
+  nohup bash cam/scripts/mis/rb_curve.sh > runs/cam/mcl_rb_small_test/queue.log 2>&1 &
+PROBLEM=mcl SCALE=large DEVICE=gpu GPU=6 PAR=1 EXPS="CAM_tau0.1_e150_s0 CAMPrior_p1_d<dL>_e150_s0" \
+  nohup bash cam/scripts/mis/rb_curve.sh > runs/cam/mcl_rb_large_test/queue.log 2>&1 &
+```
+
+RLSA 基线（完整 test 集，6 号卡，训练开始后就能跑，不依赖训练）：
+
+```bash
+for cfg in "small|same|--num_t 50 --num_k 20 --tau0 <τS> --num_d <dS'>" \
+           "large|same|--num_t 50 --num_k 20 --tau0 <τL> --num_d <dL'>" \
+           "small|paper|--num_t 100 --num_k 200 --tau0 4 --num_d 2" \
+           "large|paper|--num_t 500 --num_k 200 --tau0 4 --num_d 2"; do
+  IFS="|" read -r sc name args <<< "$cfg"
+  CUDA_VISIBLE_DEVICES=6 PROBLEM=mcl SCALE=$sc MODE=test PROJECT=mcl_rb_rlsa EXP=${sc}_$name \
+    bash cam/scripts/mis/mis_rb_cam.sh --method RLSA $args > runs/queue_cam_rb/mcl_rlsa_${sc}_$name.log 2>&1
+  echo "$sc $name $(head -1 runs/cam/mcl_rb_rlsa/${sc}_$name/test_log.txt)"
+done
+```
+
+`<τS> <dS'>`、`<τL> <dL'>` 是扫参里整个网格最好的配置；`paper` 是 RLSA 论文最大团的设定（表 4：τ0 = 4，d = 2，200 条链，RB-small 100 步、RB-large 500 步，β = 1.02），用来核对我们的 RLSA 实现和数据能不能复现论文的 18.97 / 40.53。如果差得多（比如 > 0.3），先停下来告诉用户，可能是数据不同（RLSA 用 DiffUCO 的 RB 图，我们用 CAM 发布的 RB 图）。
+
+### 8.6 汇报
+
+- 扫参结束后：两张表（每个规模一个 τ0 × d 表），选出的 d，以及是否偏离 τ0 = 1。
+- 训练第一天：每个 epoch 的时间，validation 曲线前几个点，有没有发散。
+- 全部结束后：test 曲线表、best.pt、两个 RLSA 基线，和 RLSA 论文表 2 对比；同时更新 `docs/status.md`。
