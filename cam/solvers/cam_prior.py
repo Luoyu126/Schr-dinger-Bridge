@@ -76,6 +76,10 @@ Training labels (docs/status.md; 11-10 decision): only the label changes, the re
                            lam^(T-2-t) on G_{T-1}; lam = 1 is CAM's label (num_clips 1), lam = 0 the
                            gradient at the next state only (RLSA's local signal); --label_lambda.
                            CAM App. C.2 (segments, --num_clips L) is a piecewise-constant relative.
+    --label_mode nosign    CAM's label without its sign factor (-1)^{X_t xor X_1} (CAM Eq. 23/30): the
+                           target of state X_t is multiplied by (1 - 2 p_t), p_t = 1 if node i flips an
+                           odd number of times after step t (X_{T-1},i != X_{t+1},i). Exact for a
+                           state-independent reference (docs/label_correction.md section 6).
     --label_frac f         per stored state, round(f * N) nodes sampled uniformly enter the loss
                            (adjoint and KL terms, rescaled by N/m); f = 1 and cam = the original path
 """
@@ -133,11 +137,12 @@ def add_cam_prior_args(parser):
                         '(otherwise an error)')
     g.add_argument('--residual_init', default='zero', choices=['zero', 'default'],
                    help='zero-initialise the output head, so that the untrained sampler is RLSA')
-    g.add_argument('--label_mode', default='cam', choices=['cam', 'sim', 'lin', 'dense'],
+    g.add_argument('--label_mode', default='cam', choices=['cam', 'sim', 'lin', 'dense', 'nosign'],
                    help="training label: cam = CAM's lean adjoint target; sim = simulated label, "
                         'RLSA rollouts from the two candidate next states (solvers/sim_labels.py); '
                         'lin = first-order label along the trajectory (solvers/lin_labels.py); '
-                        'dense = lambda-weighted flip gradients of the later states (--label_lambda)')
+                        'dense = lambda-weighted flip gradients of the later states (--label_lambda); '
+                        "nosign = CAM's label without its sign factor")
     g.add_argument('--label_lambda', type=float, default=1.0,
                    help='dense labels: weight decay over later states, in [0, 1] (1 = CAM)')
     g.add_argument('--lin_neighbors', action='store_true',
@@ -224,8 +229,8 @@ class CAMPrior(CAM):
         self.label_lambda = args.label_lambda
         if not 0 <= self.label_lambda <= 1:
             raise ValueError(f'--label_lambda must be in [0, 1], got {self.label_lambda}')
-        if self.label_mode == 'dense' and args.num_clips != 1:
-            raise NotImplementedError('--label_mode dense is defined for --num_clips 1')
+        if self.label_mode in ('dense', 'nosign') and args.num_clips != 1:
+            raise NotImplementedError(f'--label_mode {self.label_mode} is defined for --num_clips 1')
         self.label_frac = args.label_frac
         if not 0 < self.label_frac <= 1:
             raise ValueError(f'--label_frac must be in (0, 1], got {self.label_frac}')
@@ -467,6 +472,12 @@ class CAMPrior(CAM):
                 R[t] = (1 - lam)*grads[t + 1] + lam*R[t + 1]
             target_all = torch.stack(R, dim=1)*(2*S - 1)*mask                    # n x T x Kc
 
+        if self.label_mode == 'nosign':
+            end = states[T - 1]                                                  # where CAM's grad is taken
+            odd = torch.stack([(end != nexts[t]).float() if t < T - 1 else torch.zeros_like(end)
+                               for t in range(T)], dim=1)                        # n x T x Kc
+            target_all = clips[-1][2].unsqueeze(1)*(2*S - 1)*(1 - 2*odd)*mask
+
         buffer = BatchBuffer()
         for (t0_, t1_, grad) in clips:
             sl = slice(t0_, t1_ + 1)
@@ -475,7 +486,7 @@ class CAMPrior(CAM):
             all_prior = torch.stack(priors[sl], dim=-1)
             all_mask = mask[:, sl].permute(0, 2, 1)
             weight = torch.ones_like(all_time)*(t1_+1)/self.num_tp
-            if self.label_mode in ('sim', 'lin', 'dense'):
+            if self.label_mode in ('sim', 'lin', 'dense', 'nosign'):
                 target = target_all[:, sl].permute(0, 2, 1)
             else:
                 target = grad.unsqueeze(-1)*(2*all_data-1)               # CAM's target, as in _generate_data_cam
