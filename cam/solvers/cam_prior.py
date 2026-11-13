@@ -69,6 +69,13 @@ Training labels (docs/status.md; 11-10 decision): only the label changes, the re
     --label_mode lin       first-order label along the trajectory (solvers/lin_labels.py,
                            derivation in docs/label_correction.md); own perturbation only, unless
                            --lin_neighbors (adds the neighbour-reaction term, which diverges)
+    --label_mode dense     lambda-weighted flip gradients along the trajectory (11-13 decision):
+                           with G_j = grad(X_j), the state X_t gets R_t * (2 x_t - 1) where
+                               R_{T-1} = G_{T-1},  R_t = (1 - lam) G_{t+1} + lam R_{t+1},
+                           i.e. weights (1 - lam) lam^(j-t-1) on G_{t+1}, ..., G_{T-2} and the rest
+                           lam^(T-2-t) on G_{T-1}; lam = 1 is CAM's label (num_clips 1), lam = 0 the
+                           gradient at the next state only (RLSA's local signal); --label_lambda.
+                           CAM App. C.2 (segments, --num_clips L) is a piecewise-constant relative.
     --label_frac f         per stored state, round(f * N) nodes sampled uniformly enter the loss
                            (adjoint and KL terms, rescaled by N/m); f = 1 and cam = the original path
 """
@@ -126,10 +133,13 @@ def add_cam_prior_args(parser):
                         '(otherwise an error)')
     g.add_argument('--residual_init', default='zero', choices=['zero', 'default'],
                    help='zero-initialise the output head, so that the untrained sampler is RLSA')
-    g.add_argument('--label_mode', default='cam', choices=['cam', 'sim', 'lin'],
+    g.add_argument('--label_mode', default='cam', choices=['cam', 'sim', 'lin', 'dense'],
                    help="training label: cam = CAM's lean adjoint target; sim = simulated label, "
                         'RLSA rollouts from the two candidate next states (solvers/sim_labels.py); '
-                        'lin = first-order label along the trajectory (solvers/lin_labels.py)')
+                        'lin = first-order label along the trajectory (solvers/lin_labels.py); '
+                        'dense = lambda-weighted flip gradients of the later states (--label_lambda)')
+    g.add_argument('--label_lambda', type=float, default=1.0,
+                   help='dense labels: weight decay over later states, in [0, 1] (1 = CAM)')
     g.add_argument('--lin_neighbors', action='store_true',
                    help='lin labels: add the neighbour-reaction term (NAAS Hessian analogue; the '
                         'recursion diverges, docs/label_correction.md 3.8)')
@@ -211,6 +221,11 @@ class CAMPrior(CAM):
         if self.label_mode in ('sim', 'lin') and args.problem != 'mis':
             # both rebuild the MIS energy from graph.edge_index / graph.A, not from envs/<problem>.py
             raise NotImplementedError(f'--label_mode {self.label_mode} supports --problem mis only')
+        self.label_lambda = args.label_lambda
+        if not 0 <= self.label_lambda <= 1:
+            raise ValueError(f'--label_lambda must be in [0, 1], got {self.label_lambda}')
+        if self.label_mode == 'dense' and args.num_clips != 1:
+            raise NotImplementedError('--label_mode dense is defined for --num_clips 1')
         self.label_frac = args.label_frac
         if not 0 < self.label_frac <= 1:
             raise ValueError(f'--label_frac must be in (0, 1], got {self.label_frac}')
@@ -376,7 +391,7 @@ class CAMPrior(CAM):
         a 0/1 mask column appended."""
         n, Kc, T = graph.num_nodes, self.num_kp, self.num_tp
         solution = torch.randint(0, 2, size=(n, Kc), device=self.accelerator.device, dtype=torch.float)
-        states, times, priors, logits_all, clips = [], [], [], [], []
+        states, times, priors, logits_all, clips, grads = [], [], [], [], [], []
         clip_frequency = np.ceil(self.num_tp/self.num_clips)
         ratio = self.prior_tau_ratio()
         start = 0
@@ -388,6 +403,8 @@ class CAMPrior(CAM):
                                              grad if self.prior_problem is self.problem else None)
             priors.append(prior)
             logits_all.append(logits)
+            if self.label_mode == 'dense':
+                grads.append(grad)
             flip_prob = torch.sigmoid(logits)
             if ((t+1)%clip_frequency == 0) or (t==self.num_tp-1):
                 clips.append((start, t, grad.clone()))
@@ -442,6 +459,14 @@ class CAMPrior(CAM):
                                 neighbors=getattr(self.args, 'lin_neighbors', False))  # T x n x Kc
             target_all = lab.permute(1, 0, 2)*mask                                 # n x T x Kc
 
+        if self.label_mode == 'dense':
+            lam = self.label_lambda
+            R = [None]*T
+            R[T - 1] = grads[T - 1]
+            for t in range(T - 2, -1, -1):
+                R[t] = (1 - lam)*grads[t + 1] + lam*R[t + 1]
+            target_all = torch.stack(R, dim=1)*(2*S - 1)*mask                    # n x T x Kc
+
         buffer = BatchBuffer()
         for (t0_, t1_, grad) in clips:
             sl = slice(t0_, t1_ + 1)
@@ -450,7 +475,7 @@ class CAMPrior(CAM):
             all_prior = torch.stack(priors[sl], dim=-1)
             all_mask = mask[:, sl].permute(0, 2, 1)
             weight = torch.ones_like(all_time)*(t1_+1)/self.num_tp
-            if self.label_mode in ('sim', 'lin'):
+            if self.label_mode in ('sim', 'lin', 'dense'):
                 target = target_all[:, sl].permute(0, 2, 1)
             else:
                 target = grad.unsqueeze(-1)*(2*all_data-1)               # CAM's target, as in _generate_data_cam
@@ -501,6 +526,7 @@ class CAMPrior(CAM):
                 'num_tp': self.num_tp, 'beta': a.beta, 'global_step': self.global_step,
                 'prior_policy': a.prior_policy, 'prior_kl_ref': a.prior_kl_ref,
                 'label_mode': a.label_mode, 'label_frac': a.label_frac,
+                'label_lambda': getattr(a, 'label_lambda', 1.0),
                 'lin_neighbors': getattr(a, 'lin_neighbors', False)}
 
     def save_ckpt(self, save_file):
