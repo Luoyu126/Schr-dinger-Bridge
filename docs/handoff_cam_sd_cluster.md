@@ -19,20 +19,20 @@
    - 每一步遇到问题就停下来问用户，不要自行换方案。
    - 分数掉下来不要停，也不要重启。
 
-## 1. 现状一览（11-13 11:15 EST 更新）
+## 1. 现状一览（11-13 11:40 EST 更新）
 
 | GPU | 任务 | 状态 |
 |---|---|---|
-| 0 | 最小支配集 BA-large，原版 CAM（`CAM_tau0.1_e100_s0`） | 训练中，11-13 10:41 启动，见 `docs/handoff_mds_ba_large.md` |
+| 0 | 最小支配集 BA-large，原版 CAM（`CAM_tau0.1_e100_s0`） | 训练中，约 21 分钟一个 epoch，预计 11-14 约 21:30 训完，见 `docs/handoff_mds_ba_large.md` |
 | 1 | 最小支配集 BA-large，CAMPrior 先验温度 0.1、d=20（`CAMPrior_p0.1_d20_e100_s0`） | 训练中，同上 |
-| 2 | 最大团 RB-small，原版 CAM（`CAM_tau0.1_e100_s0`） | 训练中，59/100 个 epoch，见 8.7 |
-| 3 | 最大团 RB-small，CAMPrior 先验温度 1、d=10（`CAMPrior_p1_d10_e100_s0`） | 训练中，56/100 个 epoch |
-| 4 | 最大团 RB-large，原版 CAM（`CAM_tau0.1_e150_s0`） | 训练中，37/150 个 epoch |
-| 5 | 最大团 RB-large，CAMPrior 先验温度 0.1、d=20（`CAMPrior_p0.1_d20_e150_s0`） | 训练中，36/150 个 epoch |
-| 6 | 最小支配集 BA-large，CAMPrior 先验温度 1、d=20（`CAMPrior_p1_d20_e100_s0`） | 训练中，11-13 10:41 启动 |
-| 7 | 别的用户（yixinhu2），约 10:48 起 | 不能用。原本给最小支配集的评测用，三条 test 曲线队列从第 0 个点起全部被拒绝 |
+| 2 | 最大团 RB-small，原版 CAM + 更新幅度正则 α=0.1、Δ=10（`CAM_tau0.1_reg0.1_D10_e100_s0`） | 训练中，11-13 11:19 启动，约 16 分钟一个 epoch，见 8.8 |
+| 3 | 最大团 RB-small，原版 CAM + 正则 α=1、Δ=10（`CAM_tau0.1_reg1_D10_e100_s0`） | 训练中，同上 |
+| 4 | 最大团 RB-small，CAMPrior 先验温度 1、d=10 + 正则 α=0.1、Δ=10（`CAMPrior_p1_d10_reg0.1_D10_e100_s0`） | 训练中，约 17 分钟一个 epoch |
+| 5 | 最大团 RB-small，CAMPrior 先验温度 1、d=10 + 正则 α=1、Δ=10（`CAMPrior_p1_d10_reg1_D10_e100_s0`） | 训练中，同上 |
+| 6 | 最小支配集 BA-large，CAMPrior 先验温度 1、d=20（`CAMPrior_p1_d20_e100_s0`） | 训练中，同 0 号卡 |
+| 7 | 别的用户（yixinhu2），约 11-13 10:48 起 | 不能用 |
 
-没有空卡。最大团的 test 评测已按用户要求暂停（11-12 22:40）。
+没有空卡。最大团原来的四组（不加正则）已于 11-13 11:18 停掉，checkpoint 和日志保留。最大团和最小支配集的 test 评测都暂停中（7 号卡被占），等有空卡再补。
 
 ## 2. 本集群环境
 
@@ -367,3 +367,17 @@ PROBLEM=mcl GPUS="2 3 4 5" SCALES=small \
 - 如果某一档成功，用户再决定是否用它重跑 RB-large（RB-large 的 Δ 按其先验 d = 20 取 20）。
 
 **评测**：新的组名带 `_reg<α>_D<Δ>`，`rb_curve.sh` 会自动去掉这个后缀来重建评测参数（正则只影响训练，不影响采样）。7 号卡被占的情况下评测先不排，等用户安排。
+
+**执行情况（11-13 11:40 EST）**
+- **停掉原来四组**（11:18）：用 `ps` 找到四个训练主进程，逐个 `kill <pid>`（RB-small 原版 CAM 2660614、RB-small CAMPrior 2660613、RB-large 原版 CAM 2660616、RB-large CAMPrior 2660615），上层的启动脚本随之退出。停下时分别训到第 60、56、37、37 个 epoch。checkpoint 和日志都在 `runs/cam/mcl_rb_{small,large}/` 和 `runs/queue_cam_rb/`，没有删。0、1、6 号卡的最小支配集训练没动。
+- **启动四组正则实验**（11:19）：先 `DRY=1` 确认每条命令都带 `--lambd`（0.1 或 1）和 `--num_d 10`，CAMPrior 两组另带自己的 `--prior_d 10`。
+
+| 卡 | 实验 | pid | 第一个 epoch 耗时 | 第 1 个 epoch 后 validation |
+|---|---|---|---|---|
+| 2 | `CAM_tau0.1_reg0.1_D10_e100_s0` | 3186644 | 16.4 分钟 | 16.77 |
+| 3 | `CAM_tau0.1_reg1_D10_e100_s0` | 3186648 | 15.6 分钟 | 16.56 |
+| 4 | `CAMPrior_p1_d10_reg0.1_D10_e100_s0` | 3186653 | 17.3 分钟 | 12.61 |
+| 5 | `CAMPrior_p1_d10_reg1_D10_e100_s0` | 3186660 | 17.3 分钟 | **18.50** |
+
+  对照（8.7，不加正则，第 1 个 epoch 后）：原版 CAM 15.66，CAMPrior 12.64；训练前 test：原版 CAM 16.89，CAMPrior 18.72；同预算 RLSA test 18.81。预计 100 个 epoch 在 11-14 约 14:00–15:30 训完。第 5、10、20 个 epoch 时再汇报。
+
