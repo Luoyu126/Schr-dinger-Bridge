@@ -141,6 +141,15 @@ shows only the items below).
     insertion) with CAM's merge + 2-opt and moves the edge state toward that tour, with annealed
     random flips; compared with random-state and distance-greedy decodes at the same final 2-opt.
     Needs the Cython merge built in place (`utils/cython_merge`, `python setup.py build_ext --inplace`).
+33. `main.py` / `solvers/meta_solver.py`: `--start_epoch E` continues a run from
+    `--checkpoint epoch_<E-1>.pt` (temperature schedule from epoch E, the step-based learning-rate
+    schedule advanced by the skipped optimizer steps; optimizer moments start fresh) and
+    `--stop_epoch S` stops after epoch S-1 while the schedules still run over `--epochs`.
+    `solvers/cam_prior.py`: `--label_mode simpol`, simulated labels under the current sampler
+    (prior + network; with `--simpol_kl on` the cost-to-go adds tau * KL, i.e. the soft value of the
+    current policy, docs/label_correction.md 7.5), computed in-process in chunks of `--simpol_chunk`
+    columns; `--label_states s` labels only a fraction s of the stored states (any label mode).
+    `tests/test_cam_prior.py` test 8. `scripts/mis/simpol_er700.sh` launches the three-arm continuation.
 
 `scripts/config.sh` and the other upstream scripts are unchanged and not used by our runner.
 `CAMPrior` runs through the same runner by appending flags, e.g.
