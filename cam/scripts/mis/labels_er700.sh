@@ -7,17 +7,22 @@
 #   SET=camsub  control: CAM's own labels on the same 10% (same subsampling and loss rescaling)
 #   SET=lin     first-order labels (solvers/lin_labels.py, own perturbation only) on all nodes,
 #               computed on the trainer's GPU (FRAC is ignored)
+#   SET=dense   lambda-weighted flip gradients of the later states (--label_mode dense), LAM = lambda
+#               (1 = CAM's label); all nodes, FRAC is ignored
+#   SET=clips   CAM's segment labels (CAM App. C.2, --num_clips CLIPS) with CAM's label mode
 # The training log goes to runs/queue_cam_er700/mis_er700__<exp>.log; an existing run directory is
 # never reused.
 #
 #   SET=sim GPU=0 LABEL_GPUS=1,2,3 SEED=0 bash cam/scripts/mis/labels_er700.sh
 #   SET=camsub GPU=5 SEED=0 bash cam/scripts/mis/labels_er700.sh
 #   SET=lin GPU=6 SEED=0 bash cam/scripts/mis/labels_er700.sh
+#   SET=dense LAM=0.9 GPU=8 SEED=0 bash cam/scripts/mis/labels_er700.sh
+#   SET=clips CLIPS=5 GPU=0 SEED=0 bash cam/scripts/mis/labels_er700.sh
 #   ... DRY=1 ...   (print only)
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../../.."
 source cam/scripts/env.sh
-SET="${SET:?set SET=sim, camsub or lin}"; GPU="${GPU:?set GPU}"; SEED="${SEED:-0}"
+SET="${SET:?set SET=sim, camsub, lin, dense or clips}"; GPU="${GPU:?set GPU}"; SEED="${SEED:-0}"
 FRAC="${FRAC:-0.1}"; EPOCHS="${EPOCHS:-100}"; DRY="${DRY:-0}"
 case "$SET" in
     sim)
@@ -31,7 +36,15 @@ case "$SET" in
     lin)
         EXTRA="--label_mode lin"
         exp="CAMPrior_p1_linlab_e${EPOCHS}_s${SEED}" ;;
-    *) echo "error: SET must be sim, camsub or lin" >&2; exit 1 ;;
+    dense)
+        LAM="${LAM:?set LAM, e.g. 0.9}"
+        EXTRA="--label_mode dense --label_lambda $LAM"
+        exp="CAMPrior_p1_dense${LAM}_e${EPOCHS}_s${SEED}" ;;
+    clips)
+        CLIPS="${CLIPS:?set CLIPS, e.g. 5}"
+        EXTRA="--num_clips $CLIPS"
+        exp="CAMPrior_p1_clips${CLIPS}_e${EPOCHS}_s${SEED}" ;;
+    *) echo "error: SET must be sim, camsub, lin, dense or clips" >&2; exit 1 ;;
 esac
 (CUDA_VISIBLE_DEVICES="$GPU" cam_require_gpu)
 DATA="${CAM_ER700_DIR:-/data/shengyuf/MIS/data_er}"

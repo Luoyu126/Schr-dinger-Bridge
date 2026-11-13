@@ -45,6 +45,11 @@ GROUP_FLAGS = {
     'CAMPrior_p1_simlab0.1': ['--method', 'CAMPrior', '--prior_tau0', '1'],
     'CAMPrior_p1_camlab0.1': ['--method', 'CAMPrior', '--prior_tau0', '1'],
 }
+# dense-label and segment-label runs (labels_er700.sh SET=dense / clips): sampling is plain CAMPrior p1
+for _lam in ('0', '0.3', '0.5', '0.7', '0.8', '0.9', '0.95', '0.97', '0.99'):
+    GROUP_FLAGS[f'CAMPrior_p1_dense{_lam}'] = ['--method', 'CAMPrior', '--prior_tau0', '1']
+for _c in ('2', '5', '10', '25', '50'):
+    GROUP_FLAGS[f'CAMPrior_p1_clips{_c}'] = ['--method', 'CAMPrior', '--prior_tau0', '1']
 SPLITS = {  # name: (test dir, num_t, output dir)
     'test': ('er_test', 50, 'runs/cam/mis_er700_test10'),
     'large': ('er_large_test', 200, 'runs/cam/mis_er700_large'),
