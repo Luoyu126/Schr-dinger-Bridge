@@ -42,6 +42,31 @@ sys.path.insert(0, CAM_DIR)
 from envs.tsp import batched_two_opt_torch, merge_tours  # noqa: E402
 
 
+def fast_two_opt(points, tours, max_iterations, device):
+    """Best-improvement 2-opt like envs/tsp.py batched_two_opt_torch (same move set and choice), but
+    vectorised over the batch and applied only to tours that still have an improving move (the
+    upstream loop reverses a segment in every tour whenever any tour of the batch improves)."""
+    with torch.inference_mode():
+        P = torch.as_tensor(points, device=device)
+        T = torch.as_tensor(tours, device=device)
+        B, n1 = T.shape
+        n = n1 - 1
+        pos = torch.arange(n1, device=device)
+        for _ in range(max_iterations):
+            a, b = P[T[:, :-1]], P[T[:, 1:]]                                  # B x n x 2
+            d_ab = (a - b).norm(dim=-1)                                       # edge (i, i+1)
+            change = (torch.cdist(a, a) + torch.cdist(b, b) - d_ab.unsqueeze(2) - d_ab.unsqueeze(1))
+            change = torch.triu(change, diagonal=2)
+            best, arg = change.reshape(B, -1).min(1)
+            act = best < -1e-6
+            if not bool(act.any()):
+                break
+            i, j = (arg // n).unsqueeze(1), (arg % n).unsqueeze(1)
+            seg = (pos > i) & (pos <= j) & act.unsqueeze(1)
+            T = torch.gather(T, 1, torch.where(seg, i + 1 + j - pos, pos))
+        return T.cpu().numpy()
+
+
 def load(path, n_inst):
     out = []
     for line in open(path).read().splitlines()[:n_inst]:
@@ -70,13 +95,17 @@ class Instance:
         self.key = {(a, b): i for i, (a, b) in enumerate(zip(self.e0, self.e1))}
         self.hash = self.e0*self.n + self.e1
 
-    def decode(self, x, n_2opt, device):
-        """x: (K, E) heatmaps -> closed tours (K, n+1) after merge and n_2opt 2-opt iterations"""
+    def decode(self, x, n_2opt, device, fast=False):
+        """x: (K, E) heatmaps -> closed tours (K, n+1) after merge and n_2opt 2-opt iterations
+        (upstream batched_two_opt_torch, or fast_two_opt with fast=True)"""
         K = x.shape[0]
         tours, _ = merge_tours(x.reshape(-1) + 1e-6, self.pts, self.edge_index, sparse_graph=True, parallel_sampling=K)
         tours = np.array(tours, dtype=np.int64)
         if n_2opt > 0:
-            tours, _ = batched_two_opt_torch(self.pts, tours, max_iterations=n_2opt, device=device)
+            if fast:
+                tours = fast_two_opt(self.pts, tours, n_2opt, device)
+            else:
+                tours, _ = batched_two_opt_torch(self.pts, tours, max_iterations=n_2opt, device=device)
         return tours
 
     def indicator(self, tours):
@@ -86,11 +115,11 @@ class Instance:
         return np.stack([np.isin(self.hash, hk) for hk in h]).astype(np.float64)
 
 
-def run_prior(inst, K, T, n_step, p_toward, d0, lam0, lam1, rng, device, trace):
+def run_prior(inst, K, T, n_step, p_toward, d0, lam0, lam1, rng, device, trace, fast=False):
     x = rng.integers(0, 2, size=(K, inst.E)).astype(np.float64)
     for k in range(T):
         lam = lam0 + (lam1 - lam0)*k/max(T - 1, 1)
-        tours = inst.decode(1 - lam + lam*x, n_step, device)
+        tours = inst.decode(1 - lam + lam*x, n_step, device, fast)
         trace.append(float(tour_len(inst.pts, tours).mean()))
         y = inst.indicator(tours)
         rate = np.where(x != y, p_toward, d0*(1 - k/T)/inst.E)
@@ -112,6 +141,7 @@ def main():
     ap.add_argument('--d0', default='0,100,500')
     ap.add_argument('--lam', default='1:1,0:1', help='lam0:lam1 pairs')
     ap.add_argument('--controls', default='random,greedy')
+    ap.add_argument('--fast_step', default='0', help='per-step 2-opt implementation(s): 0 upstream, 1 fast_two_opt')
     ap.add_argument('--seed', type=int, default=0)
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
@@ -132,10 +162,13 @@ def main():
     log(f'{len(data)} instances, n={insts[0].n}, |E|={insts[0].E}, reference length {ref.mean():.4f}')
 
     configs = [dict(method=c) for c in a.controls.split(',') if c]
-    for s, p, d, lm in itertools.product(a.step_2opt.split(','), a.p_toward.split(','), a.d0.split(','),
-                                         a.lam.split(',')):
-        configs.append(dict(method='prior', step_2opt=int(s), p_toward=float(p), d0=float(d),
-                            lam0=float(lm.split(':')[0]), lam1=float(lm.split(':')[1])))
+    for s, p, d, lm, fs in itertools.product(a.step_2opt.split(','), a.p_toward.split(','), a.d0.split(','),
+                                             a.lam.split(','), a.fast_step.split(',')):
+        cfg = dict(method='prior', step_2opt=int(s), p_toward=float(p), d0=float(d),
+                   lam0=float(lm.split(':')[0]), lam1=float(lm.split(':')[1]))
+        if fs == '1':
+            cfg['fast_step'] = True
+        configs.append(cfg)
     path = os.path.join(a.out, 'report.json')
     report = json.load(open(path)) if os.path.exists(path) else dict(args=vars(a), ref=float(ref.mean()), results=[])
     done = {json.dumps(r['config'], sort_keys=True) for r in report['results']}
@@ -155,7 +188,7 @@ def main():
                 x, n_final = np.zeros((1, inst.E)), budget
             else:
                 x = run_prior(inst, a.K, a.T, cfg['step_2opt'], cfg['p_toward'], cfg['d0'],
-                              cfg['lam0'], cfg['lam1'], rng, device, trace)
+                              cfg['lam0'], cfg['lam1'], rng, device, trace, cfg.get('fast_step', False))
                 n_final = a.final_2opt
             pre = tour_len(inst.pts, inst.decode(x, 0, device))
             post = tour_len(inst.pts, inst.decode(x, n_final, device))
