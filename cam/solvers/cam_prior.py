@@ -208,6 +208,9 @@ class CAMPrior(CAM):
         self.prior_policy = args.prior_policy == 'on'
         self.prior_kl_rlsa = args.prior_kl_ref == 'rlsa'
         self.label_mode = args.label_mode
+        if self.label_mode in ('sim', 'lin') and args.problem != 'mis':
+            # both rebuild the MIS energy from graph.edge_index / graph.A, not from envs/<problem>.py
+            raise NotImplementedError(f'--label_mode {self.label_mode} supports --problem mis only')
         self.label_frac = args.label_frac
         if not 0 < self.label_frac <= 1:
             raise ValueError(f'--label_frac must be in (0, 1], got {self.label_frac}')
