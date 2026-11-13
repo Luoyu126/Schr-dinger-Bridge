@@ -124,7 +124,9 @@ shows only the items below).
     gains `SET=dense|clips|nosign|camnosign`, `scripts/mis/eval_queue_er700.py` their groups.
 30. Added `scripts/mis/d3_label_theory.py` (exact small-graph and CRN large-graph checks of when the
     lean label is right) and `scripts/mis/label_tabular.py` (idealised training on all 2^n states
-    with exact label expectations).
+    with exact label expectations). `d3_label_theory.py large --checkpoint` repeats the CRN check
+    under a trained CAMPrior policy (prior + residual); `scripts/mis/label_softopt.py` checks the
+    labels against the soft optimum of the CAMPrior objective (docs/label_correction.md section 7).
 31. Added `envs/mds.py` and `datasets/mds.py` (`--problem mds`, minimum dominating set, the
     DiffUCO energy A sum x + B sum (1 - x_i) prod_{N(i)} (1 - x_j), A = 1, B = 1.01). The energy is
     multilinear, so the flip difference is exactly (1 - 2x) * grad; the gradient comes from cover
