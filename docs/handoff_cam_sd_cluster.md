@@ -332,3 +332,38 @@ RB-large：
 - 6 号、7 号卡先后被别的用户占用，评测队列被拒绝；按用户要求暂停评测。
 - 仓库里的代码和脚本没有改动；诊断脚本 `runs/scratch/mcl_diag/target_scale.py` 和 `pilot.sh` 只在本机，不进 git。
 
+
+### 8.8 停掉退化的最大团训练，改试“更新幅度正则”（11-13 用户决定）
+
+**决定**：四组最大团训练（2–5 号卡）在 validation 上都比训练前差，且低于同预算 RLSA（RB-small 18.81、RB-large 38.75，test），用户 11-13 决定停掉，改试新实验。checkpoint 和日志保留，不删。
+
+**为什么试这个**：
+- 诊断（8.7）：最大团的 CAM 标签量级大（平均 9.7，MIS 2.1）且不对称（“不要加”约 +10，“保留”约 −0.5），把策略推向“不翻 / 全关”。理论部分（`docs/label_correction.md` §7）的结论是：CAM 的 lean 标签只是“终点局部改进”的信号，不是在估计 adjoint；约束强时局部方向会把训练带偏。
+- CAM 论文附录 C.1：把转移率惩罚换成 α(‖u‖₁ − Δ)²，让每一步期望翻转数保持在 Δ 附近，“防止转移率过早塌缩、跳出局部最优”；代码里是 `--lambd α --num_d Δ`（默认 α = 0 即关闭；损失项 `lambd*((Σ_i p_i − num_d)^2)`，按图求和）。RLSA 论文里同类正则让 RLNN 在最大团上从 16.62 到 18.13（表 3）。
+- 注意：CAMPrior 的先验步长是 `--prior_d`，和 `--num_d` 是两个参数，互不影响。
+
+**超参怎么定的**：
+- Δ = 10：RB-small 上 CAMPrior 先验 d = 10，先验本身每步大约翻 d 个点；CAM 组也用 10，两组可比。
+- α 取 0.1 和 1 两档：标签单点量级约 10；全关时 Σp − Δ ≈ −10，惩罚对单点的梯度 2α·10，α = 0.1 时约 2（弱于标签），α = 1 时约 20（强于标签），一弱一强把范围夹住。
+- 训练长度、退火、学习率和原来完全一样（100 个 epoch 的日程），这样第 k 个 epoch 可以和停掉的那几组直接比。
+
+**命令**（先停 2–5 号卡上的四个最大团训练进程：用 `ps` 找到对应 pid 后逐个 `kill <pid>`，不要用 `pkill -f`）：
+
+```bash
+git pull origin mis-asbs-energy-base
+PROBLEM=mcl GPUS="2 3 4 5" SCALES=small \
+  RUN_GROUPS="CAM_tau0.1_reg0.1_D10 CAM_tau0.1_reg1_D10 CAMPrior_p1_d10_reg0.1_D10 CAMPrior_p1_d10_reg1_D10" \
+  DRY=1 bash cam/scripts/mis/rb_runs.sh          # 先看命令，应带 --lambd 和 --num_d 10
+PROBLEM=mcl GPUS="2 3 4 5" SCALES=small \
+  RUN_GROUPS="CAM_tau0.1_reg0.1_D10 CAM_tau0.1_reg1_D10 CAMPrior_p1_d10_reg0.1_D10 CAMPrior_p1_d10_reg1_D10" \
+  bash cam/scripts/mis/rb_runs.sh
+```
+
+（sa 上已用 4 张小图各训 1 个极小 epoch 冒烟测试过两种方法，能正常训练和验证。）
+
+**怎么判断**（只汇报，不要自行停或改）：
+- 第 5、10、20 个 epoch 时汇报四组的 validation，和停掉的两组同一 epoch 的值（8.7 表）以及 RLSA 放在一起。
+- 成功的标准：最近 5 个 epoch 均值不低于训练前（CAMPrior 的训练前约 18.7），且不再出现大幅来回跳。
+- 如果某一档成功，用户再决定是否用它重跑 RB-large（RB-large 的 Δ 按其先验 d = 20 取 20）。
+
+**评测**：新的组名带 `_reg<α>_D<Δ>`，`rb_curve.sh` 会自动去掉这个后缀来重建评测参数（正则只影响训练，不影响采样）。7 号卡被占的情况下评测先不排，等用户安排。
