@@ -398,6 +398,14 @@ RB-large（11-11 训完；同预算 RLSA 35.50，CAM 论文 1500 epoch 41.25，K
 - 日志：`runs/queue_cam_mcut/mcut_ba_large__<实验名>.log`，test 结果：`runs/cam/mcut_ba_large/<实验名>/test_log.txt`。
 - **补种子**：11-12 09:50 UTC 启动 CAM 和 CAMPrior τ0=1 的种子 1、2（GPU 4、6、7、9），每个 epoch 约 20 分钟，100 个 epoch 约 33 小时。
 
+### 2.10 最小支配集（MDS）BA-[200-300] 和 BA-[800-1200]（11-13 启动）
+
+**目的。** 把 CAMPrior 推广到高阶能量（DiffUCO 表 2 的 MDS 能量，多线性，度数阶）。代码 `cam/envs/mds.py`，数据是 CAM 公开数据里的 `MDS.zip`，超参照搬 MaxCut BA 脚本，100 个 epoch，种子 0。对比基线是 PT-Denoise 表 2（BA-small / BA-large，越小越好）：DiffUCO 28.01 / 104.01，PT-Denoise 27.90 / 103.84，Gurobi 27.89 / 104.01。
+
+- **RLSA validation 扫参**（64 张图，50 步 × 20 条链）：BA-small 最好 τ0=0.1、d=10（27.875），τ0=1 这一行最好 d=10（28.906）；BA-large 最好 τ0=0.1、d=20（105.47），τ0=1 这一行最好 d=40（110.25）。
+- **BA-small**（sa 集群，11-13 02:00 UTC 起）：CAM τ0=0.1、CAMPrior 先验温度 0.1 和 1（d=10），GPU 4、6、7；和 MaxCut 共卡，约 25 分钟一个 epoch。
+- **BA-large**（交给另一个集群的 4 张卡，`docs/handoff_mds_ba_large.md`）：CAM τ0=0.1、CAMPrior 先验温度 0.1 和 1（d=20），加 test 曲线和同预算 RLSA 基线。
+
 ## 3. 连续臂（AS、ASBS）
 
 ### 3.1 已定的设定（`plan.md` §0.8）
