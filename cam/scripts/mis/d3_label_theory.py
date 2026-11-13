@@ -275,8 +275,9 @@ def large(args, log):
             G = pickle.load(fh)
         G = nx.convert_node_labels_to_integers(G)
         n = G.number_of_nodes()
-        A = torch.tensor(nx.to_numpy_array(G), dtype=torch.float64, device=dev)
-        b = -torch.ones(n, 1, device=dev, dtype=torch.float64)
+        dt = torch.float32 if args.fp32 else torch.float64
+        A = torch.tensor(nx.to_numpy_array(G), dtype=dt, device=dev)
+        b = -torch.ones(n, 1, device=dev, dtype=dt)
         # envs/mis.py: edge weight 1/2 per directed edge, grad = 2 beta (A/2) x + b
         Ah = A/2
 
@@ -294,7 +295,7 @@ def large(args, log):
         for ratio in [float(r) for r in args.ratios.split(',')]:
             temps = [args.prior_tau0*(1 - j/T)*ratio for j in range(T)]
             gen = torch.Generator(device=dev).manual_seed(gi*100 + int(ratio*10))
-            x = torch.randint(0, 2, (n, args.chains), generator=gen, device=dev).double()
+            x = torch.randint(0, 2, (n, args.chains), generator=gen, device=dev).to(dt)
             X = [x]
             for j in range(T):
                 x = torch.where(torch.rand(n, args.chains, generator=gen, device=dev) < torch.sigmoid(logits(x, j, temps)), 1 - x, x)
@@ -318,10 +319,16 @@ def large(args, log):
                 pair = torch.cat([x_nf, x_f], 1)
                 CR = C*R
                 ham = [float((pair[:, :CR] != pair[:, CR:]).double().sum(0).mean())]
+
+                def g_fact(pr):                                                  # grad of node i, factual run
+                    Zf = torch.where(flipped.unsqueeze(0), pr[:, CR:], pr[:, :CR])
+                    return (2*beta*(Ah@Zf) + b)[rows, ar]
+                G_path = [g_fact(pair)]                                          # at X_{k+1} .. X_T
                 for j in range(k + 1, T):
                     u = torch.rand(n, CR, generator=gen, device=dev)
                     pair = torch.where(torch.cat([u, u], 1) < torch.sigmoid(logits(pair, j, temps)), 1 - pair, pair)
                     ham.append(float((pair[:, :CR] != pair[:, CR:]).double().sum(0).mean()))
+                    G_path.append(g_fact(pair))
                 e = energy(pair)
                 truth = (e[:CR] - e[CR:]).reshape(C, R).cpu().numpy()                # CRN pair labels
                 # shortcut on the factual run of each pair
@@ -336,6 +343,14 @@ def large(args, log):
                     assert max(ham) == min(ham) == 1.0 and np.allclose(truth, par, atol=1e-6), \
                         f'claim 1 fails: hamming {min(ham)}..{max(ham)}, max|truth - par| {np.abs(truth - par).max()}'
                 mt, se = truth.mean(1), truth.std(1, ddof=1)/np.sqrt(R)
+                dense = {}
+                for lam in [float(v) for v in args.lams.split(',')]:
+                    Lp = len(G_path)                                             # T - k states after step k
+                    w = [(1 - lam)*lam**m for m in range(Lp - 1)] + [lam**(Lp - 1)]
+                    Rg = sum(wm*gm for wm, gm in zip(w, G_path))
+                    lab = (Rg*(2*xprev - 1)).reshape(C, R).cpu().numpy()
+                    dense[str(lam)] = dict(corr_mean=corr(lab.mean(1), mt), corr_one=corr(lab[:, 0], mt),
+                                           mean_abs=float(np.abs(lab).mean()))
                 h = R//2
                 ref_half = truth[:, h:].mean(1)
                 r = dict(graph=os.path.basename(fn), n=n, ratio=ratio, k=k, items=C, reps=R,
@@ -351,7 +366,7 @@ def large(args, log):
                          corr_mean_par_vs_mean_truth=corr(par.mean(1), mt),
                          sim_K_vs_heldout_half={str(K): corr(truth[:, :K].mean(1), ref_half)
                                                 for K in (1, 2, 4, 8, 16, 32) if K <= h},
-                         split_half_reliability=corr(truth[:, :h].mean(1), ref_half))
+                         split_half_reliability=corr(truth[:, :h].mean(1), ref_half), dense=dense)
                 report['runs'].append(r)
                 log(f'{r["graph"]} n={n} ratio {ratio} k={k}: E(X_T) {r["energy_factual_T"]:.1f}, hamming {r["hamming_by_lag"]} merged {merged:.2f}; '
                     f'one pair |.| {r["one_pair_abs"]:.2f} noise {r["one_pair_noise_std"]:.2f}, E-label rms {r["exact_rms_est"]:.3f} '
@@ -394,6 +409,8 @@ def main():
     l.add_argument('--nodes', type=int, default=16)
     l.add_argument('--reps', type=int, default=64, help='CRN pairs per item (E1/E3 at scale)')
     l.add_argument('--ref', default='rlsa', choices=['rlsa', 'uniform'])
+    l.add_argument('--lams', default='0,0.5,0.8,0.9,0.97,1', help='dense labels compared with the CRN truth')
+    l.add_argument('--fp32', action='store_true')
     a = ap.parse_args()
     torch.set_num_threads(8)
     log = Logger(a.out)
