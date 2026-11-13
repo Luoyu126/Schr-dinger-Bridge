@@ -509,6 +509,58 @@ def test_5_ablation_switches():
     return '; '.join(out)
 
 
+
+def test_6_dense_labels():
+    """--label_mode dense: lambda = 1 reproduces CAM's buffer exactly (same random numbers); other
+    lambdas give sum_j w_j grad(X_j) * (2 x_t - 1) with the explicit weights of the docstring."""
+    out = []
+    with TmpDir() as tmp:
+        data = write_dataset(os.path.join(tmp, 'g'), [26, 19], 0.25, seed=11)
+        graph = load_batch(data, [0, 1])
+        T, K = 6, 4
+
+        def gen(**over):
+            torch.manual_seed(5)
+            solver = build(CAMPrior, data, residual_init='default', **over)
+            torch.manual_seed(9)
+            return solver, solver.generate_data(graph)
+
+        _, ref = gen()
+        _, d1 = gen(label_mode='dense', label_lambda=1.0)
+        assert len(ref) == len(d1) == T*K and len(d1[0]) == 6
+        for a, b in zip(ref, d1):
+            for c in range(5):
+                assert torch.equal(a[c], b[c]), c
+            assert torch.equal(b[5], torch.ones_like(b[5]))
+        out.append('lambda 1 == CAM buffer')
+
+        for lam in (0.0, 0.5, 0.8):
+            solver, ds = gen(label_mode='dense', label_lambda=lam)
+            X = torch.stack([ds[i][0] for i in range(T*K)]).reshape(K, T, -1)        # chain, step, node
+            assert torch.equal(torch.stack([ds[i][0] for i in range(T*K)])[:T], X[0])
+            G = torch.stack([solver.problem.energy_func(graph, X[:, t].T, True)[1].T for t in range(T)], 1)
+            err = 0.0
+            for t in range(T):
+                if t == T - 1:
+                    w = {T - 1: 1.0}
+                else:
+                    w = {j: (1 - lam)*lam**(j - t - 1) for j in range(t + 1, T - 1)}
+                    w[T - 1] = lam**(T - 2 - t)
+                assert abs(sum(w.values()) - 1) < 1e-12
+                R = sum(wj*G[:, j] for j, wj in w.items())
+                expect = R*(2*X[:, t] - 1)
+                got = torch.stack([ds[k*T + t][3] for k in range(K)])
+                err = max(err, (got - expect).abs().max().item())
+            assert err < 1e-5, (lam, err)
+            out.append(f'lambda {lam}: matches formula ({err:.1e})')
+        try:
+            build(CAMPrior, data, label_mode='dense', label_lambda=0.5, num_clips=2)
+            raise AssertionError('num_clips 2 accepted')
+        except NotImplementedError:
+            pass
+    return '; '.join(out)
+
+
 # ---------------------------------------------------------------- runner
 if __name__ == '__main__':
     tests = [(k, v) for k, v in list(globals().items()) if k.startswith('test_') and callable(v)]
