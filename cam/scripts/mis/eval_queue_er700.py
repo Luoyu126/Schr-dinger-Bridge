@@ -48,6 +48,10 @@ GROUP_FLAGS = {
 # dense-label and segment-label runs (labels_er700.sh SET=dense / clips): sampling is plain CAMPrior p1
 for _lam in ('0', '0.3', '0.5', '0.7', '0.8', '0.9', '0.95', '0.97', '0.99'):
     GROUP_FLAGS[f'CAMPrior_p1_dense{_lam}'] = ['--method', 'CAMPrior', '--prior_tau0', '1']
+GROUP_FLAGS['CAMPrior_p1_nosign'] = ['--method', 'CAMPrior', '--prior_tau0', '1']
+# plain CAM trained through CAMPrior with the prior switched off: sampling is the network alone
+GROUP_FLAGS['CAM_tau0.1_nosign'] = ['--method', 'CAMPrior', '--prior_policy', 'off', '--prior_kl_ref', 'uniform',
+                                    '--tau0', '0.1']
 for _c in ('2', '5', '10', '25', '50'):
     GROUP_FLAGS[f'CAMPrior_p1_clips{_c}'] = ['--method', 'CAMPrior', '--prior_tau0', '1']
 SPLITS = {  # name: (test dir, num_t, output dir)

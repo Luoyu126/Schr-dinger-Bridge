@@ -10,6 +10,9 @@
 #   SET=dense   lambda-weighted flip gradients of the later states (--label_mode dense), LAM = lambda
 #               (1 = CAM's label); all nodes, FRAC is ignored
 #   SET=clips   CAM's segment labels (CAM App. C.2, --num_clips CLIPS) with CAM's label mode
+#   SET=nosign     CAM's label without its sign factor (--label_mode nosign), CAMPrior p1
+#   SET=camnosign  the same for plain CAM (tau0 0.1): CAMPrior with the prior switched off in the
+#                  policy and the KL (= CAM's loss + const, tests/test_cam_prior.py) and CAM's init
 # The training log goes to runs/queue_cam_er700/mis_er700__<exp>.log; an existing run directory is
 # never reused.
 #
@@ -22,7 +25,7 @@
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../../.."
 source cam/scripts/env.sh
-SET="${SET:?set SET=sim, camsub, lin, dense or clips}"; GPU="${GPU:?set GPU}"; SEED="${SEED:-0}"
+SET="${SET:?set SET=sim, camsub, lin, dense, clips, nosign or camnosign}"; GPU="${GPU:?set GPU}"; SEED="${SEED:-0}"
 FRAC="${FRAC:-0.1}"; EPOCHS="${EPOCHS:-100}"; DRY="${DRY:-0}"
 case "$SET" in
     sim)
@@ -44,7 +47,13 @@ case "$SET" in
         CLIPS="${CLIPS:?set CLIPS, e.g. 5}"
         EXTRA="--num_clips $CLIPS"
         exp="CAMPrior_p1_clips${CLIPS}_e${EPOCHS}_s${SEED}" ;;
-    *) echo "error: SET must be sim, camsub, lin, dense or clips" >&2; exit 1 ;;
+    nosign)
+        EXTRA="--label_mode nosign"
+        exp="CAMPrior_p1_nosign_e${EPOCHS}_s${SEED}" ;;
+    camnosign)
+        EXTRA="--label_mode nosign --prior_policy off --prior_kl_ref uniform --residual_init default --tau0 0.1"
+        exp="CAM_tau0.1_nosign_e${EPOCHS}_s${SEED}" ;;
+    *) echo "error: SET must be sim, camsub, lin, dense, clips, nosign or camnosign" >&2; exit 1 ;;
 esac
 (CUDA_VISIBLE_DEVICES="$GPU" cam_require_gpu)
 DATA="${CAM_ER700_DIR:-/data/shengyuf/MIS/data_er}"
