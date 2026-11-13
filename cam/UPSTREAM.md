@@ -116,6 +116,23 @@ shows only the items below).
     unchanged); with `mcl` runs go to `runs/cam/mcl_rb_<scale>/`. Added
     `scripts/mis/rb_rlsa_sweep.sh`: RLSA over a (tau0, d) grid on the first 64 validation graphs
     with CAM's budget, several GPUs, to choose the prior and the same-budget RLSA baseline.
+29. `solvers/cam_prior.py`: two more training labels. `--label_mode dense --label_lambda lam`
+    replaces the terminal flip gradient by a lambda-weighted average of the flip gradients of the
+    later states (lam = 1 is CAM's label); `--label_mode nosign` drops CAM's sign factor
+    (-1)^{X_t xor X_1} (exact for a state-independent reference, docs/label_correction.md 6). Both
+    need `--num_clips 1`; `tests/test_cam_prior.py` tests 6 and 7. `scripts/mis/labels_er700.sh`
+    gains `SET=dense|clips|nosign|camnosign`, `scripts/mis/eval_queue_er700.py` their groups.
+30. Added `scripts/mis/d3_label_theory.py` (exact small-graph and CRN large-graph checks of when the
+    lean label is right) and `scripts/mis/label_tabular.py` (idealised training on all 2^n states
+    with exact label expectations).
+31. Added `envs/mds.py` and `datasets/mds.py` (`--problem mds`, minimum dominating set, the
+    DiffUCO energy A sum x + B sum (1 - x_i) prod_{N(i)} (1 - x_j), A = 1, B = 1.01). The energy is
+    multilinear, so the flip difference is exactly (1 - 2x) * grad; the gradient comes from cover
+    counts (two neighbour sums). Decoders: greedy cover by probability then descent (continuous),
+    descent from the rounded state (discrete); both end at minimal dominating sets.
+    `tests/test_mds.py` (5 tests, `MDS_TEST_BA=<dir>` adds real BA graphs). `scripts/mds/` has the
+    launcher (BA-small / BA-large from the HF `MDS.zip`, MaxCut BA hyperparameters, since public CAM
+    has no MDS script) and the RLSA validation sweep.
 
 `scripts/config.sh` and the other upstream scripts are unchanged and not used by our runner.
 `CAMPrior` runs through the same runner by appending flags, e.g.
