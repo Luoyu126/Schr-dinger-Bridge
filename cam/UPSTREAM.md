@@ -135,6 +135,12 @@ shows only the items below).
     `tests/test_mds.py` (5 tests, `MDS_TEST_BA=<dir>` adds real BA graphs). `scripts/mds/` has the
     launcher (BA-small / BA-large from the HF `MDS.zip`, MaxCut BA hyperparameters, since public CAM
     has no MDS script) and the RLSA validation sweep.
+32. Added `scripts/tsp/prior_gate.py`: a training-free check of a local-search prior for TSP (the
+    analogue of the RLSA prior on MIS, where the prior is the label's operator applied to the current
+    state). Each step decodes the state (blended with a constant heatmap, i.e. distance-greedy
+    insertion) with CAM's merge + 2-opt and moves the edge state toward that tour, with annealed
+    random flips; compared with random-state and distance-greedy decodes at the same final 2-opt.
+    Needs the Cython merge built in place (`utils/cython_merge`, `python setup.py build_ext --inplace`).
 
 `scripts/config.sh` and the other upstream scripts are unchanged and not used by our runner.
 `CAMPrior` runs through the same runner by appending flags, e.g.
