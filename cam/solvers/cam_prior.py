@@ -80,8 +80,16 @@ Training labels (docs/status.md; 11-10 decision): only the label changes, the re
                            target of state X_t is multiplied by (1 - 2 p_t), p_t = 1 if node i flips an
                            odd number of times after step t (X_{T-1},i != X_{t+1},i). Exact for a
                            state-independent reference (docs/label_correction.md section 6).
+    --label_mode simpol    on-policy simulated label (docs/label_correction.md 7.5): like sim, but the
+                           rollouts from the two candidate next states use the current sampler (prior
+                           + network residual), in-process on the trainer's device. With --simpol_kl
+                           (default on) the cost-to-go adds tau_train * KL(p_j || ref_j) of the later
+                           steps, so the label is the soft value difference of the current policy
+                           (soft policy iteration; its fixed point is the soft optimum p*).
     --label_frac f         per stored state, round(f * N) nodes sampled uniformly enter the loss
                            (adjoint and KL terms, rescaled by N/m); f = 1 and cam = the original path
+    --label_states s       only round(s * num_tp * num_kp) stored states per graph (sampled uniformly)
+                           get labels, the others are masked out; the loss is rescaled by 1/s
 """
 import atexit
 import copy
@@ -137,12 +145,17 @@ def add_cam_prior_args(parser):
                         '(otherwise an error)')
     g.add_argument('--residual_init', default='zero', choices=['zero', 'default'],
                    help='zero-initialise the output head, so that the untrained sampler is RLSA')
-    g.add_argument('--label_mode', default='cam', choices=['cam', 'sim', 'lin', 'dense', 'nosign'],
+    g.add_argument('--label_mode', default='cam', choices=['cam', 'sim', 'lin', 'dense', 'nosign', 'simpol'],
                    help="training label: cam = CAM's lean adjoint target; sim = simulated label, "
                         'RLSA rollouts from the two candidate next states (solvers/sim_labels.py); '
                         'lin = first-order label along the trajectory (solvers/lin_labels.py); '
                         'dense = lambda-weighted flip gradients of the later states (--label_lambda); '
-                        "nosign = CAM's label without its sign factor")
+                        "nosign = CAM's label without its sign factor; simpol = simulated label "
+                        'under the current sampler (prior + network)')
+    g.add_argument('--simpol_kl', default='on', choices=['on', 'off'],
+                   help='simpol labels: add tau_train * KL to the reference along the rollout (soft value)')
+    g.add_argument('--simpol_chunk', type=int, default=256,
+                   help='simpol labels: rollout columns per network forward (memory bound)')
     g.add_argument('--label_lambda', type=float, default=1.0,
                    help='dense labels: weight decay over later states, in [0, 1] (1 = CAM)')
     g.add_argument('--lin_neighbors', action='store_true',
@@ -151,6 +164,9 @@ def add_cam_prior_args(parser):
     g.add_argument('--label_frac', type=float, default=1.0,
                    help='fraction of nodes per stored state that enter the loss (sampled uniformly, '
                         'fresh per graph; the loss is rescaled by num_nodes/m)')
+    g.add_argument('--label_states', type=float, default=1.0,
+                   help='fraction of stored states per graph that get labels (sampled uniformly, the '
+                        'others are masked out; the loss is rescaled by 1/fraction)')
     g.add_argument('--label_gpus', default='',
                    help='physical GPU ids for the sim-label workers, e.g. 4,5,6,7 (empty: compute '
                         "in-process on the trainer's device)")
@@ -223,19 +239,24 @@ class CAMPrior(CAM):
         self.prior_policy = args.prior_policy == 'on'
         self.prior_kl_rlsa = args.prior_kl_ref == 'rlsa'
         self.label_mode = args.label_mode
-        if self.label_mode in ('sim', 'lin') and args.problem != 'mis':
+        if self.label_mode in ('sim', 'lin', 'simpol') and args.problem != 'mis':
             # both rebuild the MIS energy from graph.edge_index / graph.A, not from envs/<problem>.py
             raise NotImplementedError(f'--label_mode {self.label_mode} supports --problem mis only')
         self.label_lambda = args.label_lambda
         if not 0 <= self.label_lambda <= 1:
             raise ValueError(f'--label_lambda must be in [0, 1], got {self.label_lambda}')
-        if self.label_mode in ('dense', 'nosign') and args.num_clips != 1:
+        if self.label_mode in ('dense', 'nosign', 'simpol') and args.num_clips != 1:
             raise NotImplementedError(f'--label_mode {self.label_mode} is defined for --num_clips 1')
         self.label_frac = args.label_frac
         if not 0 < self.label_frac <= 1:
             raise ValueError(f'--label_frac must be in (0, 1], got {self.label_frac}')
+        self.label_states = args.label_states
+        if not 0 < self.label_states <= 1:
+            raise ValueError(f'--label_states must be in (0, 1], got {self.label_states}')
         self.label_gpus = [g for g in str(args.label_gpus).replace(' ', '').split(',') if g]
         self.label_timeout = args.label_timeout
+        self.simpol_kl = args.simpol_kl == 'on'
+        self.simpol_chunk = args.simpol_chunk
         self.label_scale = 1.0
         self._label_pool = None
         self._mask_gen = None
@@ -314,7 +335,7 @@ class CAMPrior(CAM):
 
     @torch.no_grad()
     def generate_data(self, graph):
-        if self.label_mode == 'cam' and self.label_frac >= 1:
+        if self.label_mode == 'cam' and self.label_frac >= 1 and self.label_states >= 1:
             return self._generate_data_cam(graph)
         return self._generate_data_labels(graph)
 
@@ -420,8 +441,16 @@ class CAMPrior(CAM):
 
         S = torch.stack(states, dim=1)                                   # n x T x Kc (items t-major)
         idx, m = self._sample_mask(n, T*Kc)                              # m x (T*Kc)
-        mask = torch.zeros(n, T*Kc, device=S.device).scatter_(0, idx, 1.0).reshape(n, T, Kc)
-        self.label_scale = n/m
+        mask = torch.zeros(n, T*Kc, device=S.device).scatter_(0, idx, 1.0)
+        items = torch.arange(T*Kc, device=S.device)                      # stored states with labels
+        if self.label_states < 1:
+            r = max(1, int(round(self.label_states*T*Kc)))
+            items = torch.rand(T*Kc, generator=self._mask_gen, device=S.device).topk(r).indices.sort().values
+            keep = torch.zeros(T*Kc, device=S.device)
+            keep[items] = 1.0
+            mask = mask*keep
+        mask = mask.reshape(n, T, Kc)
+        self.label_scale = n/m*(T*Kc)/len(items)
 
         if self.label_mode == 'sim':
             if graph.num_graphs != 1:
@@ -451,6 +480,27 @@ class CAMPrior(CAM):
                 pool = self._label_pool
                 self._label_log(f'[sim-labels] last 50 graphs: {np.mean(self._label_time):.2f}s/graph '
                                 f'for labels; pool stats {pool.stats if pool is not None else "in-process"}')
+                self._label_time = []
+
+        if self.label_mode == 'simpol':
+            if graph.num_graphs != 1:
+                raise NotImplementedError('--label_mode simpol needs --batch_size 1')
+            t0 = time.time()
+            Xn = torch.stack(nexts, dim=1).reshape(n, T*Kc)
+            flipped = (Xn != S.reshape(n, T*Kc)).float()
+            sign = 1 - 2*torch.gather(flipped, 0, idx).T                 # C x m
+            starts = np.repeat(np.arange(1, T + 1), Kc)
+            self._label_iter += 1
+            seeds = (int(self.args.seed) + 1)*10**12 + self._label_iter*10**5 + np.arange(T*Kc)
+            it = items.cpu().numpy()
+            lab = self.policy_cf_labels(graph, Xn[:, items], idx.T[items].contiguous(), sign[items],
+                                        starts[it], seeds[it], ratio)
+            target_all = torch.zeros(n, T*Kc, device=S.device)
+            target_all[:, items] = torch.zeros(n, len(it), device=S.device).scatter_(0, idx[:, items], lab.T)
+            target_all = target_all.reshape(n, T, Kc)
+            self._label_time.append(time.time() - t0)
+            if len(self._label_time) == 50:
+                self._label_log(f'[simpol-labels] last 50 graphs: {np.mean(self._label_time):.2f}s/graph for labels')
                 self._label_time = []
 
         if self.label_mode == 'lin':
@@ -486,13 +536,65 @@ class CAMPrior(CAM):
             all_prior = torch.stack(priors[sl], dim=-1)
             all_mask = mask[:, sl].permute(0, 2, 1)
             weight = torch.ones_like(all_time)*(t1_+1)/self.num_tp
-            if self.label_mode in ('sim', 'lin', 'dense', 'nosign'):
+            if self.label_mode in ('sim', 'lin', 'dense', 'nosign', 'simpol'):
                 target = target_all[:, sl].permute(0, 2, 1)
             else:
                 target = grad.unsqueeze(-1)*(2*all_data-1)               # CAM's target, as in _generate_data_cam
             columns = [c.flatten(1).unbind(1) for c in (all_data, all_time, weight, target, all_prior, all_mask)]
             buffer.add(list(zip(*columns)))
         return buffer.get_dataset()
+
+    @torch.no_grad()
+    def policy_cf_labels(self, graph, x_next, sel, sign, starts, seeds, ratio):
+        """On-policy simulated labels (--label_mode simpol), on the trainer's device.
+
+        Like sim_labels.rlsa_cf_labels, but every rollout step uses the current sampler, i.e. the
+        flip logits prior + residual of flip_logits. Per item (stored state X_k, sampled nodes sel):
+        1 + m rollouts from X_{k+1} over the steps k+1 .. num_tp-1, the factual next state and one
+        per sampled node with that node toggled, sharing their uniforms (one per node and step, from
+        the item's seeded CPU generator, as in sim_labels). Cost-to-go of a rollout:
+            g(Z_T) [+ tau_train * sum_j sum_i KL(Ber(p_ij) || Ber(ref_ij))  with --simpol_kl on]
+        and label_i = sign_i * (cost(factual) - cost(toggled)), positive favours flipping.
+        x_next (n, C) 0/1, sel (C, m), sign (C, m), starts (C,) = k + 1, seeds (C,); returns (C, m).
+        """
+        from .sim_labels import item_uniforms
+        dev = x_next.device
+        n, C = x_next.shape
+        m = sel.shape[1]
+        T = self.num_tp
+        starts = torch.as_tensor(starts, dtype=torch.long)
+        order = torch.argsort(starts, stable=True)
+        s_sorted = starts[order]
+        sel_s = sel[order.to(dev)]
+        sign_s = sign[order.to(dev)]
+        U = item_uniforms(torch.as_tensor(seeds)[order], s_sorted, T, n).to(dev)       # C x T x n
+        w = m + 1
+        X = x_next[:, order.to(dev)].float().repeat_interleave(w, dim=1)                 # n x C*w
+        rows = sel_s.reshape(-1)
+        cols = (torch.arange(C, device=dev).unsqueeze(1)*w + 1 + torch.arange(m, device=dev)).reshape(-1)
+        X[rows, cols] = 1 - X[rows, cols]
+        kl_cost = torch.zeros(C*w, device=dev)
+        ref_on = self.prior_kl_rlsa
+        for j in range(int(s_sorted.min()) if C else T, T):
+            P = int(torch.searchsorted(s_sorted, torch.tensor(j), right=True))          # items with start <= j
+            if P == 0:
+                continue
+            for c0 in range(0, P*w, self.simpol_chunk):
+                c1 = min(c0 + self.simpol_chunk, P*w)
+                x = X[:, c0:c1]
+                tt = torch.ones_like(x)*j/self.num_tp
+                logits, prior = self.flip_logits(graph, x, tt, j, ratio)
+                if self.simpol_kl:
+                    ref = prior if ref_on else torch.zeros_like(prior)
+                    kl_cost[c0:c1] += float(self.tau)*bernoulli_kl_logits(logits, ref).sum(0)
+                u = U[:P, j, :].T.repeat_interleave(w, dim=1)[:, c0:c1]
+                X[:, c0:c1] = torch.where(u < torch.sigmoid(logits), 1 - x, x)
+        energy, _ = self.problem.energy_func(graph, X, False)
+        cost = (energy.reshape(-1) + kl_cost).reshape(C, w)
+        lab_sorted = sign_s.float()*(cost[:, :1] - cost[:, 1:])
+        out = torch.empty_like(lab_sorted)
+        out[order.to(dev)] = lab_sorted
+        return out
 
     # ------------------------------------------------------------------ inference
     def evaluate_single(self, graph):
